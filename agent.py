@@ -194,6 +194,13 @@ class CDP:
                             await isend("Input.insertText",{"text":text})
                             if sid: await isend("DOM.discardSearchResults",{"searchId":sid})
                             await iws.close()
+                            # Scroll back up so user can see the comment
+                            await self.cmd("Runtime.evaluate",{"expression":"window.scrollTo(0,0)"})
+                            await asyncio.sleep(0.5)
+                            await self.cmd("Runtime.evaluate",{"expression":"""
+                                const btn=Array.from(document.querySelectorAll('button')).find(b=>/comment/i.test(b.textContent));
+                                if(btn) btn.scrollIntoView({block:'center'});
+                            """})
                             return f"{G}Comment drafted! ({len(text)} chars) — NOT posted, ready for review.{RS}"
                     if sid: await isend("DOM.discardSearchResults",{"searchId":sid})
                 # Wait for SpotIM to render
@@ -379,8 +386,22 @@ async def run(task):
 def main():
     print(f"\n{BD}  → Local Browser Agent{RS}")
     print(f"  {D}MLX + CDP · iframes + Shadow DOM · no cloud{RS}\n")
-    task = " ".join(sys.argv[1:]) if len(sys.argv)>1 else input(f"{BD}What should I do?{RS} ")
-    if not task.strip(): return
-    print(); asyncio.run(run(task))
+
+    # If args passed, run once
+    if len(sys.argv) > 1:
+        task = " ".join(sys.argv[1:])
+        print(); asyncio.run(run(task))
+        return
+
+    # Interactive loop — keep running tasks
+    while True:
+        try:
+            task = input(f"\n{BD}What should I do?{RS} ")
+            if not task.strip(): continue
+            if task.strip().lower() in ("quit","exit","q"): break
+            print(); asyncio.run(run(task))
+        except (KeyboardInterrupt, EOFError):
+            print(f"\n{D}Bye!{RS}")
+            break
 
 if __name__=="__main__": main()
