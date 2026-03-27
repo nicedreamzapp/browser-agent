@@ -350,7 +350,7 @@ async def run(task):
             # Generate comment if needed
             if not comment_text:
                 print(f"  {D}Step 3{RS} {B}generate comment{RS}")
-                article_text = await cdp.js("document.querySelector('article, main, [role=main]')?.innerText?.substring(0,800) || document.title")
+                article_text = await cdp.js("document.title + '. ' + Array.from(document.querySelectorAll('p')).map(p=>p.innerText).filter(t=>t.length>40).slice(0,6).join(' ')")
                 comment_text = generate_comment(article_text[:600])
                 print(f"         {D}→ {comment_text[:80]}...{RS}")
 
@@ -412,7 +412,7 @@ async def run(task):
     # If we hit max steps on a comment task, try commenting on whatever page we're on
     if is_comment:
         if not comment_text:
-            article_text = await cdp.js("document.querySelector('article, main')?.innerText?.substring(0,500) || document.title")
+            article_text = await cdp.js("document.title + '. ' + Array.from(document.querySelectorAll('p')).map(p=>p.innerText).filter(t=>t.length>40).slice(0,6).join(' ')")
             comment_text = generate_comment(article_text)
         print(f"\n  {BD}Auto-commenting on current page...{RS}")
         result = await cdp.post_comment(comment_text)
