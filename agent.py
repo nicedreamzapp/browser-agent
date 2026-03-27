@@ -264,7 +264,61 @@ async def run(task):
                 if len(comment_text) > 20: break
                 comment_text = None
 
-    messages = [{"role":"user","content":f"Task: {task}\n\nRULES:\n- Navigate to the site, then snapshot to see the page.\n- Find article links in the snapshot — they have UIDs. Click one with click(uid).\n- After clicking an article and seeing the article page in the next snapshot, call done immediately.\n- Do NOT use the search bar. Do NOT scroll endlessly. Just find a link and click it.\n- If the snapshot shows article headlines, pick one and click its UID."}]
+    # Extract topic keywords for smart navigation
+    topic_words = []
+    for word in ["iran","trump","war","ukraine","china","russia","gaza","israel","economy","oil"]:
+        if word in task.lower(): topic_words.append(word)
+
+    # FAST PATH: If this is a "go to site + find article + comment" task, skip the model for navigation
+    if is_comment and topic_words:
+        topic = " ".join(topic_words)
+        # Detect which site
+        site_url = "https://news.yahoo.com"
+        for site in ["yahoo","reddit","cnn","bbc","nytimes"]:
+            if site in task.lower():
+                if site == "yahoo": site_url = "https://news.yahoo.com"
+                elif site == "reddit": site_url = "https://www.reddit.com"
+                break
+
+        print(f"  {D}Step 1{RS} {B}navigate{RS}({site_url})")
+        await cdp.navigate(site_url)
+
+        print(f"  {D}Step 2{RS} {B}find article{RS}(topic='{topic}')")
+        r = await cdp.js(f"""
+            const links = Array.from(document.querySelectorAll('a'));
+            const article = links.find(a => {{
+                const text = a.textContent.toLowerCase();
+                const href = a.href || '';
+                return text.length > 30 && (href.includes('article') || href.includes('/news/'))
+                    && {' && '.join(f'text.includes("{w}")' for w in topic_words)};
+            }});
+            if(article) {{ article.click(); article.textContent.trim().substring(0,100) }}
+            else {{ 'NOT_FOUND' }}
+        """)
+
+        if r and r != "NOT_FOUND":
+            print(f"         {D}→ {r[:80]}{RS}")
+            await asyncio.sleep(3)
+
+            # Generate comment if needed
+            if not comment_text:
+                print(f"  {D}Step 3{RS} {B}generate comment{RS}")
+                article_text = await cdp.js("document.querySelector('article, main, [role=main]')?.innerText?.substring(0,800) || document.title")
+                gen_resp = ask_model([{"role":"user","content":f"Write a thoughtful 2-3 sentence comment about this article. Just the comment text, nothing else:\n\n{article_text[:600]}"}])
+                comment_text = re.sub(r'<think>.*?</think>','',gen_resp,flags=re.DOTALL).strip().strip('"')
+                print(f"         {D}→ {comment_text[:80]}...{RS}")
+
+            # Post comment
+            print(f"  {D}Step 4{RS} {B}post comment{RS}")
+            result = await cdp.post_comment(comment_text)
+            print(f"  {result}")
+            print(f"\n{G}{BD}Done!{RS}")
+            await cdp.close()
+            return
+        else:
+            print(f"         {D}→ No article found with topic '{topic}', falling back to model{RS}")
+
+    messages = [{"role":"user","content":f"Task: {task}\n\nRULES:\n- Navigate to the site, then snapshot.\n- Find article links and click one.\n- After reaching an article page, call done immediately."}]
 
     for step in range(1, MAX_STEPS+1):
         t0=time.time(); resp=ask_model(messages); elapsed=time.time()-t0
