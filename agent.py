@@ -181,42 +181,37 @@ class CDP:
             await isend("DOM.getDocument",{"depth":-1,"pierce":True})
 
             # Search inside the iframe (pierces Shadow DOM)
-            for attempt in range(3):
-                for selector in [".ProseMirror","[contenteditable=true]","textarea","[role=textbox]"]:
-                    r = await isend("DOM.performSearch",{"query":selector,"includeUserAgentShadowDOM":True})
-                    count = r.get("resultCount",0)
-                    sid = r.get("searchId","")
-                    if count > 0:
-                        results = await isend("DOM.getSearchResults",{"searchId":sid,"fromIndex":0,"toIndex":count})
-                        for nid in results.get("nodeIds",[]):
-                            fr = await isend("DOM.focus",{"nodeId":nid})
-                            if "error" in fr: continue
-                            await asyncio.sleep(0.3)
-                            print(f"  {D}→ Typing comment ({len(text)} chars)...{RS}")
-                            await isend("Input.insertText",{"text":text})
-                            if sid: await isend("DOM.discardSearchResults",{"searchId":sid})
-                            await iws.close()
-                            # Scroll comment area into view
-                            await asyncio.sleep(0.5)
-                            await self.cmd("Runtime.evaluate",{"expression":"""
-                                // Try multiple ways to find and scroll to the comment area
-                                const selectors = ['iframe[src*=openweb]','iframe[src*=spot]','[data-spot-im-module-default-area]','#spotim-specific'];
-                                for(const sel of selectors) {
-                                    const el = document.querySelector(sel);
-                                    if(el) { el.scrollIntoView({block:'start',behavior:'instant'}); window.scrollBy(0,-100); break; }
-                                }
-                                // Fallback: scroll to Comments button
-                                if(!document.querySelector('iframe[src*=openweb]')) {
-                                    const btn=Array.from(document.querySelectorAll('button')).find(b=>/comment/i.test(b.textContent));
-                                    if(btn) { btn.scrollIntoView({block:'start',behavior:'instant'}); window.scrollBy(0,100); }
-                                }
-                            """})
-                            return f"{G}Comment drafted! ({len(text)} chars) — NOT posted, ready for review.{RS}"
-                    if sid: await isend("DOM.discardSearchResults",{"searchId":sid})
-                # Wait for SpotIM to render
-                await asyncio.sleep(3)
-                await isend("DOM.disable"); await isend("DOM.enable")
+            for attempt in range(5):
                 await isend("DOM.getDocument",{"depth":-1,"pierce":True})
+                r = await isend("DOM.performSearch",{"query":".ProseMirror","includeUserAgentShadowDOM":True})
+                count = r.get("resultCount",0)
+                sid = r.get("searchId","")
+                if count > 0:
+                    results = await isend("DOM.getSearchResults",{"searchId":sid,"fromIndex":0,"toIndex":count})
+                    nid = results.get("nodeIds",[])[0]
+                    fr = await isend("DOM.focus",{"nodeId":nid})
+                    if "error" not in fr:
+                        # Critical: wait for editor to be ready
+                        await asyncio.sleep(1)
+                        print(f"  {D}→ Typing comment ({len(text)} chars)...{RS}")
+                        await isend("Input.insertText",{"text":text})
+                        await asyncio.sleep(0.5)
+                        if sid: await isend("DOM.discardSearchResults",{"searchId":sid})
+                        await iws.close()
+                        # Scroll comment area into view on main page
+                        print(f"  {D}→ Scrolling to comment...{RS}")
+                        await self.cmd("Runtime.evaluate",{"expression":"""
+                            const iframes=document.querySelectorAll('iframe');
+                            for(const f of iframes){if(f.src&&f.src.includes('openweb')){f.scrollIntoView({block:'center',behavior:'instant'});break}}
+                        """})
+                        await asyncio.sleep(0.3)
+                        # Scroll up a bit so the comment input is visible, not just the iframe top
+                        await self.cmd("Runtime.evaluate",{"expression":"window.scrollBy(0,-150)"})
+                        return f"{G}Comment drafted! ({len(text)} chars) — NOT posted, ready for review.{RS}"
+                if sid: await isend("DOM.discardSearchResults",{"searchId":sid})
+                # Wait for SpotIM to render
+                print(f"  {D}→ Waiting for editor (attempt {attempt+1})...{RS}")
+                await asyncio.sleep(3)
 
             await iws.close()
 
