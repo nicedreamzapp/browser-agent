@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""
+Local Browser Agent — Direct MLX + Chrome DevTools Protocol.
+Handles iframes, Shadow DOM, ProseMirror editors automatically.
+"""
+
+import json, os, re, sys, time, asyncio, websockets, urllib.request
+
+# ─── Config ──────────────────────────────────────────────────────────────────
+
+MLX_URL = os.environ.get("MLX_URL", "http://localhost:4000")
+CDP_URL = os.environ.get("CDP_URL", "http://127.0.0.1:9222")
+MODEL = os.environ.get("MLX_MODEL_NAME", "claude-sonnet-4-6")
+MAX_STEPS = int(os.environ.get("MAX_STEPS", "15"))
+
+B, G, Y, R, D, BD, RS = "\033[94m", "\033[92m", "\033[93m", "\033[91m", "\033[2m", "\033[1m", "\033[0m"
+
+SYSTEM = """You are a browser agent. Return ONE JSON tool call per response.
+
+TOOLS:
+- navigate(url) — Go to URL
+- snapshot() — Get page elements with UIDs. Always do after navigate/click.
+- click(uid) — Click element
+- type_text(uid, text) — Type into element
+- scroll(direction) — "up" or "down"
+- js(code) — Run JavaScript
+- done(message) — Task complete
+
+FORMAT: {"tool": "name", "args": {...}}
+RULES: After navigate, always snapshot. Be fast. No explanations, just JSON."""
+
+# ─── CDP ─────────────────────────────────────────────────────────────────────
+
+class CDP:
+    def __init__(self):
+        self.ws = None; self.mid = 0
+
+    async def connect(self):
+        with urllib.request.urlopen(f"{CDP_URL}/json", timeout=5) as r:
+            pages = json.loads(r.read())
+        ws_url = next((p["webSocketDebuggerUrl"] for p in pages if p.get("type")=="page" and "devtools" not in p.get("url","")), None)
+        if not ws_url: ws_url = pages[0]["webSocketDebuggerUrl"] if pages else None
+        if not ws_url: print(f"{R}No browser pages{RS}"); sys.exit(1)
+        self.ws = await websockets.connect(ws_url, max_size=50*1024*1024)
+        for m in ["DOM.enable","Accessibility.enable","Page.enable","Runtime.enable"]: await self.cmd(m)
+
+    async def cmd(self, method, params=None):
+        self.mid += 1
+        msg = {"id":self.mid,"method":method}
+        if params: msg["params"] = params
+        await self.ws.send(json.dumps(msg))
+        while True:
+            r = json.loads(await asyncio.wait_for(self.ws.recv(), timeout=30))
+            if r.get("id") == self.mid:
+                return r.get("result", r.get("error", {}))
+
+    async def navigate(self, url):
+        await self.cmd("Page.navigate", {"url": url}); await asyncio.sleep(3)
+        return f"Navigated to {url}"
+
+    async def snapshot(self):
+        tree = await self.cmd("Accessibility.getFullAXTree", {"max_depth": 8})
+        lines = []
+        for n in tree.get("nodes", [])[:400]:
+            role = n.get("role",{}).get("value","")
+            name = n.get("name",{}).get("value","")
+            nid = n.get("nodeId","")
+            if role in ("none","generic","InlineTextBox") and not name: continue
+            p = [f"[{nid}]" if nid else "", role]
+            if name: p.append(f'"{name[:100]}"')
+            line = " ".join(x for x in p if x)
+            if line.strip(): lines.append(line)
+        return "\n".join(lines) if lines else "(Empty)"
+
+    async def click(self, uid):
+        r = await self.cmd("DOM.resolveNode", {"backendNodeId": int(uid)})
+        if "error" in r: return f"Error: {r['error']}"
+        oid = r.get("object",{}).get("objectId")
+        if not oid: return "Error: can't resolve"
+        await self.cmd("Runtime.callFunctionOn",{"objectId":oid,"functionDeclaration":"function(){this.scrollIntoView({block:'center'})}"})
+        await asyncio.sleep(0.2)
+        box = await self.cmd("DOM.getBoxModel",{"objectId":oid})
+        if "error" in box or "model" not in box:
+            await self.cmd("Runtime.callFunctionOn",{"objectId":oid,"functionDeclaration":"function(){this.click()}"})
+            return "Clicked(JS)"
+        c = box["model"]["content"]; x=(c[0]+c[4])/2; y=(c[1]+c[5])/2
+        await self.cmd("Input.dispatchMouseEvent",{"type":"mousePressed","x":x,"y":y,"button":"left","clickCount":1})
+        await self.cmd("Input.dispatchMouseEvent",{"type":"mouseReleased","x":x,"y":y,"button":"left","clickCount":1})
+        return "Clicked"
+
+    async def type_into(self, uid, text):
+        await self.click(uid); await asyncio.sleep(0.3)
+        for ch in text:
+            await self.cmd("Input.dispatchKeyEvent",{"type":"keyDown","text":ch,"key":ch})
+            await self.cmd("Input.dispatchKeyEvent",{"type":"keyUp","key":ch})
+        return f"Typed {len(text)} chars"
+
+    async def scroll(self, d="down"):
+        delta = -500 if d=="up" else 500
+        await self.cmd("Input.dispatchMouseEvent",{"type":"mouseWheel","x":400,"y":400,"deltaX":0,"deltaY":delta})
+        await asyncio.sleep(0.5); return f"Scrolled {d}"
+
+    async def js(self, code):
+        r = await self.cmd("Runtime.evaluate",{"expression":code,"returnByValue":True,"awaitPromise":True})
+        if "error" in r: return f"Error: {r['error']}"
+        return str(r.get("result",{}).get("value", r.get("result",{}).get("description","")))[:2000]
+
+    async def post_comment(self, text):
+        """Auto-handle commenting on any page.
+        Uses DOM.pierce + DOM.focus + Input.insertText — works through
+        cross-origin iframes, Shadow DOM, and ProseMirror editors.
+        """
+        # Step 1: Click Comments button
+        print(f"  {D}→ Clicking Comments button...{RS}")
+        await self.cmd("Runtime.evaluate",{"expression":"""
+            const btn=Array.from(document.querySelectorAll('button')).find(b=>/comment/i.test(b.textContent));
+            if(btn){btn.scrollIntoView({block:'center'});btn.click()}
+        """})
+        await asyncio.sleep(3)
+
+        # Step 2: Scroll to trigger lazy-loading
+        print(f"  {D}→ Loading comment widget...{RS}")
+        for i in range(5):
+            await self.cmd("Runtime.evaluate",{"expression":"window.scrollBy(0,300)"})
+            await asyncio.sleep(1)
+
+        # Step 3: Pierce ALL iframes + Shadow DOMs and search for editor
+        print(f"  {D}→ Searching for editor (pierce mode)...{RS}")
+        await self.cmd("DOM.getDocument",{"depth":-1,"pierce":True})
+
+        for selector in [".ProseMirror", "[contenteditable=true]", "textarea", "[role=textbox]"]:
+            r = await self.cmd("DOM.performSearch",{"query":selector,"includeUserAgentShadowDOM":True})
+            count = r.get("resultCount",0)
+            sid = r.get("searchId","")
+
+            if count > 0:
+                results = await self.cmd("DOM.getSearchResults",{"searchId":sid,"fromIndex":0,"toIndex":count})
+                for nid in results.get("nodeIds",[]):
+                    fr = await self.cmd("DOM.focus",{"nodeId":nid})
+                    if "error" in fr: continue
+                    await asyncio.sleep(0.3)
+
+                    print(f"  {D}→ Typing comment ({len(text)} chars)...{RS}")
+                    await self.cmd("Input.insertText",{"text":text})
+
+                    if sid: await self.cmd("DOM.discardSearchResults",{"searchId":sid})
+                    return f"{G}Comment drafted! ({len(text)} chars) — NOT posted, ready for review.{RS}"
+
+            if sid: await self.cmd("DOM.discardSearchResults",{"searchId":sid})
+
+        # Fallback: simple main-page textarea
+        escaped = text.replace("\\","\\\\").replace("'","\\'").replace("\n","\\n")
+        r = await self.cmd("Runtime.evaluate",{"expression":f"""
+            const el=document.querySelector('textarea,input[type=text],[contenteditable=true]');
+            el?(el.focus(),el.value?el.value='{escaped}':el.innerText='{escaped}','found'):'none'
+        ""","returnByValue":True})
+        if r.get("result",{}).get("value")=="found":
+            return f"{G}Comment drafted! ({len(text)} chars){RS}"
+
+        return f"{Y}No comment input found. Comments may not be available on this page.{RS}"
+
+    async def close(self):
+        if self.ws: await self.ws.close()
+
+
+# ─── MLX ─────────────────────────────────────────────────────────────────────
+
+def ask_model(messages):
+    body = json.dumps({"model":MODEL,"max_tokens":1024,"temperature":0.3,"system":SYSTEM,"messages":messages}).encode()
+    req = urllib.request.Request(f"{MLX_URL}/v1/messages",data=body,headers={"Content-Type":"application/json"})
+    with urllib.request.urlopen(req,timeout=120) as r: result=json.loads(r.read())
+    return "".join(b.get("text","") for b in result.get("content",[]) if b.get("type")=="text")
+
+def parse(text):
+    text = re.sub(r'<think>.*?</think>','',text,flags=re.DOTALL).strip()
+    start = text.find('{"tool"')
+    if start<0: start=text.find('{ "tool"')
+    if start>=0:
+        d=0
+        for i in range(start,len(text)):
+            if text[i]=='{': d+=1
+            elif text[i]=='}':
+                d-=1
+                if d==0:
+                    try: return json.loads(text[start:i+1])
+                    except: break
+    for m in re.finditer(r'\{[^{}]+\}',text):
+        try:
+            o=json.loads(m.group(0))
+            if "tool" in o: return o
+        except: continue
+    return None
+
+
+# ─── Agent ───────────────────────────────────────────────────────────────────
+
+async def run(task):
+    cdp = CDP(); await cdp.connect()
+    print(f"{G}Connected to Brave{RS}\n")
+
+    # Detect if this is a comment task
+    is_comment = any(w in task.lower() for w in ["comment","draft","reply"])
+    comment_text = None
+    if is_comment:
+        for marker in ["draft:","comment:","text:","draft ","comment "]:
+            idx = task.lower().rfind(marker)
+            if idx >= 0:
+                comment_text = task[idx+len(marker):].strip().rstrip(".")
+                if len(comment_text) > 20: break
+                comment_text = None
+
+    messages = [{"role":"user","content":f"Task: {task}\n\nIMPORTANT: Find and click an article link. Do NOT scroll endlessly looking for comments — after clicking an article, just call done."}]
+
+    for step in range(1, MAX_STEPS+1):
+        t0=time.time(); resp=ask_model(messages); elapsed=time.time()-t0
+        tc = parse(resp)
+        if not tc:
+            print(f"  {D}Step {step} (no tool) {elapsed:.1f}s{RS}")
+            messages.append({"role":"assistant","content":resp})
+            messages.append({"role":"user","content":'Respond with ONLY: {"tool":"name","args":{...}}'})
+            continue
+
+        tool=tc.get("tool",""); args=tc.get("args",{})
+        args_s=', '.join(f'{k}={repr(v)[:40]}' for k,v in args.items())
+        print(f"  {D}Step {step}{RS} {B}{tool}{RS}({args_s}) {D}{elapsed:.1f}s{RS}")
+
+        if tool=="navigate": r=await cdp.navigate(args.get("url",""))
+        elif tool=="snapshot": r=await cdp.snapshot()
+        elif tool=="click": r=await cdp.click(str(args.get("uid","")))
+        elif tool=="type_text": r=await cdp.type_into(str(args.get("uid","")),args.get("text",""))
+        elif tool=="scroll": r=await cdp.scroll(args.get("direction","down"))
+        elif tool=="comment": r=await cdp.post_comment(args.get("text",""))
+        elif tool=="js": r=await cdp.js(args.get("code",""))
+        elif tool=="done":
+            # If this is a comment task and we're on an article, auto-comment before finishing
+            if is_comment and comment_text:
+                current_url = await cdp.js("document.URL")
+                if "article" in current_url or "/news/" in current_url:
+                    print(f"\n  {BD}Auto-commenting on article...{RS}")
+                    result = await cdp.post_comment(comment_text)
+                    print(f"  {result}")
+            print(f"\n{G}{BD}Done:{RS} {args.get('message','')}")
+            await cdp.close(); return
+        else: r=f"Unknown: {tool}"
+
+        if len(r)>4000: r=r[:4000]+"...(truncated)"
+        messages.append({"role":"assistant","content":json.dumps(tc)})
+        messages.append({"role":"user","content":f"Result: {r}"})
+        if len(messages)>10: messages=messages[:1]+messages[-8:]
+        print(f"         {D}→ {r[:100].replace(chr(10),' ')}{RS}")
+
+    # If we hit max steps on a comment task, try commenting on whatever page we're on
+    if is_comment and comment_text:
+        print(f"\n  {BD}Auto-commenting on current page...{RS}")
+        result = await cdp.post_comment(comment_text)
+        print(f"  {result}")
+
+    await cdp.close()
+
+def main():
+    print(f"\n{BD}  → Local Browser Agent{RS}")
+    print(f"  {D}MLX + CDP · iframes + Shadow DOM · no cloud{RS}\n")
+    task = " ".join(sys.argv[1:]) if len(sys.argv)>1 else input(f"{BD}What should I do?{RS} ")
+    if not task.strip(): return
+    print(); asyncio.run(run(task))
+
+if __name__=="__main__": main()
