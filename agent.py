@@ -142,13 +142,14 @@ class CDP:
         """})
         await asyncio.sleep(3)
 
-        # Step 2: Scroll to trigger lazy-loading and wait for widget
+        # Step 2: Wait for widget to load (don't scroll — it breaks Yahoo's infinite scroll)
         print(f"  {D}→ Loading comment widget...{RS}")
-        for i in range(8):
-            await self.cmd("Runtime.evaluate",{"expression":"window.scrollBy(0,300)"})
-            await asyncio.sleep(1.5)
+        await asyncio.sleep(5)
 
         # Step 3: Connect to OpenWeb iframe target and use DOM.pierce there
+        # Save current URL so we can scroll back
+        article_url = await self.js("document.URL")
+
         print(f"  {D}→ Searching for comment iframe...{RS}")
         for attempt in range(8):
             with urllib.request.urlopen(f"{CDP_URL}/json",timeout=5) as r:
@@ -157,7 +158,8 @@ class CDP:
                   and any(k in t.get("url","") for k in ["openweb","spot.im","disqus","comment"])
                   and t.get("webSocketDebuggerUrl")]
             if ow: break
-            await self.cmd("Runtime.evaluate",{"expression":"window.scrollBy(0,300)"})
+            # Small scroll only — don't trigger infinite scroll
+            await self.cmd("Runtime.evaluate",{"expression":"window.scrollBy(0,150)"})
             await asyncio.sleep(2)
         else:
             # No comment iframe found
@@ -194,11 +196,20 @@ class CDP:
                             await isend("Input.insertText",{"text":text})
                             if sid: await isend("DOM.discardSearchResults",{"searchId":sid})
                             await iws.close()
-                            # Scroll the comment widget into view
+                            # Scroll comment area into view
+                            await asyncio.sleep(0.5)
                             await self.cmd("Runtime.evaluate",{"expression":"""
-                                const ow=document.querySelector('iframe[src*=openweb],iframe[src*=spot]');
-                                if(ow) ow.scrollIntoView({block:'center'});
-                                else { const btn=Array.from(document.querySelectorAll('button')).find(b=>/comment/i.test(b.textContent)); if(btn) btn.scrollIntoView({block:'center'}); }
+                                // Try multiple ways to find and scroll to the comment area
+                                const selectors = ['iframe[src*=openweb]','iframe[src*=spot]','[data-spot-im-module-default-area]','#spotim-specific'];
+                                for(const sel of selectors) {
+                                    const el = document.querySelector(sel);
+                                    if(el) { el.scrollIntoView({block:'start',behavior:'instant'}); window.scrollBy(0,-100); break; }
+                                }
+                                // Fallback: scroll to Comments button
+                                if(!document.querySelector('iframe[src*=openweb]')) {
+                                    const btn=Array.from(document.querySelectorAll('button')).find(b=>/comment/i.test(b.textContent));
+                                    if(btn) { btn.scrollIntoView({block:'start',behavior:'instant'}); window.scrollBy(0,100); }
+                                }
                             """})
                             return f"{G}Comment drafted! ({len(text)} chars) — NOT posted, ready for review.{RS}"
                     if sid: await isend("DOM.discardSearchResults",{"searchId":sid})
