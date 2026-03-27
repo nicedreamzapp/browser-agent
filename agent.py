@@ -194,12 +194,11 @@ class CDP:
                             await isend("Input.insertText",{"text":text})
                             if sid: await isend("DOM.discardSearchResults",{"searchId":sid})
                             await iws.close()
-                            # Scroll back up so user can see the comment
-                            await self.cmd("Runtime.evaluate",{"expression":"window.scrollTo(0,0)"})
-                            await asyncio.sleep(0.5)
+                            # Scroll the comment widget into view
                             await self.cmd("Runtime.evaluate",{"expression":"""
-                                const btn=Array.from(document.querySelectorAll('button')).find(b=>/comment/i.test(b.textContent));
-                                if(btn) btn.scrollIntoView({block:'center'});
+                                const ow=document.querySelector('iframe[src*=openweb],iframe[src*=spot]');
+                                if(ow) ow.scrollIntoView({block:'center'});
+                                else { const btn=Array.from(document.querySelectorAll('button')).find(b=>/comment/i.test(b.textContent)); if(btn) btn.scrollIntoView({block:'center'}); }
                             """})
                             return f"{G}Comment drafted! ({len(text)} chars) — NOT posted, ready for review.{RS}"
                     if sid: await isend("DOM.discardSearchResults",{"searchId":sid})
@@ -232,6 +231,37 @@ def ask_model(messages):
     req = urllib.request.Request(f"{MLX_URL}/v1/messages",data=body,headers={"Content-Type":"application/json"})
     with urllib.request.urlopen(req,timeout=120) as r: result=json.loads(r.read())
     return "".join(b.get("text","") for b in result.get("content",[]) if b.get("type")=="text")
+
+def generate_comment(article_text):
+    """Generate a clean comment from article text. Handles Qwen's reasoning output."""
+    # Use system prompt for instruction, user message for article only
+    body = json.dumps({
+        "model": MODEL, "max_tokens": 200, "temperature": 0.7,
+        "system": "You write short news comments. Respond with ONLY 2-3 sentences commenting on the article. No quotes, no preamble, no reasoning, no labels. Just the comment as plain text.",
+        "messages": [{"role": "user", "content": article_text}]
+    }).encode()
+    req = urllib.request.Request(f"{MLX_URL}/v1/messages", data=body, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        result = json.loads(r.read())
+    raw = "".join(b.get("text", "") for b in result.get("content", []) if b.get("type") == "text")
+
+    # Clean Qwen's output
+    text = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
+
+    # Remove any instruction echoing or reasoning
+    skip_prefixes = ('The user', 'I need', 'Let me', 'Here is', 'Here are', 'Thinking',
+                     'Output ONLY', 'You are writing', 'Article:', '1.', '2.', '3.', '*', '- ',
+                     'Okay', 'Sure', 'Alright', 'Comment:', 'My comment:')
+    lines = []
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line: continue
+        if any(line.startswith(p) for p in skip_prefixes): continue
+        if line.startswith('"') and line.endswith('"'): line = line[1:-1]  # Remove quotes
+        lines.append(line)
+
+    return ' '.join(lines) if lines else "This is an important story that deserves more attention and discussion."
+
 
 def parse(text):
     text = re.sub(r'<think>.*?</think>','',text,flags=re.DOTALL).strip()
@@ -311,19 +341,7 @@ async def run(task):
             if not comment_text:
                 print(f"  {D}Step 3{RS} {B}generate comment{RS}")
                 article_text = await cdp.js("document.querySelector('article, main, [role=main]')?.innerText?.substring(0,800) || document.title")
-                gen_resp = ask_model([{"role":"user","content":f"You are writing a comment on a news article. Output ONLY the comment text (2-3 sentences). No thinking, no explanation, no preamble. Just the comment.\n\nArticle:\n\n{article_text[:600]}"}])
-                comment_text = re.sub(r'<think>.*?</think>','',gen_resp,flags=re.DOTALL).strip().strip('"')
-                # Qwen dumps reasoning as plain text — extract just the comment
-                # Look for quoted text first (model often puts the comment in quotes)
-                quoted = re.findall(r'"([^"]{30,})"', comment_text)
-                if quoted:
-                    comment_text = quoted[0]
-                else:
-                    # Strip preamble lines
-                    lines = [l.strip() for l in comment_text.split('\n') if l.strip()
-                             and not any(l.strip().startswith(p) for p in ('The user','I need','Let me','Here is','Thinking','1.','2.','3.','*','- '))]
-                    if lines:
-                        comment_text = ' '.join(lines[-3:])
+                comment_text = generate_comment(article_text[:600])
                 print(f"         {D}→ {comment_text[:80]}...{RS}")
 
             # Post comment
@@ -365,8 +383,7 @@ async def run(task):
                 if not comment_text:
                     print(f"\n  {BD}Generating comment from article...{RS}")
                     article_text = await cdp.js("document.querySelector('article, main, [role=main]')?.innerText?.substring(0,500) || document.title")
-                    gen_resp = ask_model([{"role":"user","content":f"You are writing a comment on a news article. Output ONLY the comment text (2-3 sentences). No thinking, no explanation, no preamble. Just the comment.\n\nArticle:\n\n{article_text}"}])
-                    comment_text = re.sub(r'<think>.*?</think>','',gen_resp,flags=re.DOTALL).strip().strip('"')
+                    comment_text = generate_comment(article_text)
                     print(f"  {D}Generated: {comment_text[:80]}...{RS}")
 
                 print(f"\n  {BD}Auto-commenting on article...{RS}")
@@ -386,8 +403,7 @@ async def run(task):
     if is_comment:
         if not comment_text:
             article_text = await cdp.js("document.querySelector('article, main')?.innerText?.substring(0,500) || document.title")
-            gen_resp = ask_model([{"role":"user","content":f"You are writing a comment on a news article. Output ONLY the comment text (2-3 sentences). No thinking, no explanation, no preamble. Just the comment.\n\nArticle:\n\n{article_text}"}])
-            comment_text = re.sub(r'<think>.*?</think>','',gen_resp,flags=re.DOTALL).strip().strip('"')
+            comment_text = generate_comment(article_text)
         print(f"\n  {BD}Auto-commenting on current page...{RS}")
         result = await cdp.post_comment(comment_text)
         print(f"  {result}")
