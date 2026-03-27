@@ -311,8 +311,15 @@ async def run(task):
             if not comment_text:
                 print(f"  {D}Step 3{RS} {B}generate comment{RS}")
                 article_text = await cdp.js("document.querySelector('article, main, [role=main]')?.innerText?.substring(0,800) || document.title")
-                gen_resp = ask_model([{"role":"user","content":f"Write a thoughtful 2-3 sentence comment about this article. Just the comment text, nothing else:\n\n{article_text[:600]}"}])
+                gen_resp = ask_model([{"role":"user","content":f"You are writing a comment on a news article. Output ONLY the comment text (2-3 sentences). No thinking, no explanation, no preamble. Just the comment.\n\nArticle:\n\n{article_text[:600]}"}])
                 comment_text = re.sub(r'<think>.*?</think>','',gen_resp,flags=re.DOTALL).strip().strip('"')
+                # If model included preamble, take only the last substantial paragraph
+                lines = [l.strip() for l in comment_text.split('\n') if l.strip() and not l.strip().startswith(('The user','I need','Let me','Here','I '))]
+                if lines:
+                    comment_text = ' '.join(lines[-3:])  # Last 3 non-preamble lines
+                # Cap at 500 chars for a reasonable comment
+                if len(comment_text) > 500:
+                    comment_text = comment_text[:497] + "..."
                 print(f"         {D}→ {comment_text[:80]}...{RS}")
 
             # Post comment
@@ -354,7 +361,7 @@ async def run(task):
                 if not comment_text:
                     print(f"\n  {BD}Generating comment from article...{RS}")
                     article_text = await cdp.js("document.querySelector('article, main, [role=main]')?.innerText?.substring(0,500) || document.title")
-                    gen_resp = ask_model([{"role":"user","content":f"Write a thoughtful 2-3 sentence comment about this article. Just the comment text, nothing else:\n\n{article_text}"}])
+                    gen_resp = ask_model([{"role":"user","content":f"You are writing a comment on a news article. Output ONLY the comment text (2-3 sentences). No thinking, no explanation, no preamble. Just the comment.\n\nArticle:\n\n{article_text}"}])
                     comment_text = re.sub(r'<think>.*?</think>','',gen_resp,flags=re.DOTALL).strip().strip('"')
                     print(f"  {D}Generated: {comment_text[:80]}...{RS}")
 
@@ -375,7 +382,7 @@ async def run(task):
     if is_comment:
         if not comment_text:
             article_text = await cdp.js("document.querySelector('article, main')?.innerText?.substring(0,500) || document.title")
-            gen_resp = ask_model([{"role":"user","content":f"Write a thoughtful 2-3 sentence comment about this article. Just the comment text, nothing else:\n\n{article_text}"}])
+            gen_resp = ask_model([{"role":"user","content":f"You are writing a comment on a news article. Output ONLY the comment text (2-3 sentences). No thinking, no explanation, no preamble. Just the comment.\n\nArticle:\n\n{article_text}"}])
             comment_text = re.sub(r'<think>.*?</think>','',gen_resp,flags=re.DOTALL).strip().strip('"')
         print(f"\n  {BD}Auto-commenting on current page...{RS}")
         result = await cdp.post_comment(comment_text)
