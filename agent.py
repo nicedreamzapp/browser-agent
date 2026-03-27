@@ -257,7 +257,7 @@ async def run(task):
     is_comment = any(w in task.lower() for w in ["comment","draft","reply"])
     comment_text = None
     if is_comment:
-        for marker in ["draft:","comment:","text:","draft ","comment "]:
+        for marker in ["draft:","comment:","text:"]:
             idx = task.lower().rfind(marker)
             if idx >= 0:
                 comment_text = task[idx+len(marker):].strip().rstrip(".")
@@ -287,13 +287,19 @@ async def run(task):
         elif tool=="comment": r=await cdp.post_comment(args.get("text",""))
         elif tool=="js": r=await cdp.js(args.get("code",""))
         elif tool=="done":
-            # If this is a comment task and we're on an article, auto-comment before finishing
-            if is_comment and comment_text:
-                current_url = await cdp.js("document.URL")
-                if "article" in current_url or "/news/" in current_url:
-                    print(f"\n  {BD}Auto-commenting on article...{RS}")
-                    result = await cdp.post_comment(comment_text)
-                    print(f"  {result}")
+            # If this is a comment task, auto-comment before finishing
+            if is_comment:
+                # If no comment text provided, generate one from article content
+                if not comment_text:
+                    print(f"\n  {BD}Generating comment from article...{RS}")
+                    article_text = await cdp.js("document.querySelector('article, main, [role=main]')?.innerText?.substring(0,500) || document.title")
+                    gen_resp = ask_model([{"role":"user","content":f"Write a thoughtful 2-3 sentence comment about this article. Just the comment text, nothing else:\n\n{article_text}"}])
+                    comment_text = re.sub(r'<think>.*?</think>','',gen_resp,flags=re.DOTALL).strip().strip('"')
+                    print(f"  {D}Generated: {comment_text[:80]}...{RS}")
+
+                print(f"\n  {BD}Auto-commenting on article...{RS}")
+                result = await cdp.post_comment(comment_text)
+                print(f"  {result}")
             print(f"\n{G}{BD}Done:{RS} {args.get('message','')}")
             await cdp.close(); return
         else: r=f"Unknown: {tool}"
@@ -305,7 +311,11 @@ async def run(task):
         print(f"         {D}→ {r[:100].replace(chr(10),' ')}{RS}")
 
     # If we hit max steps on a comment task, try commenting on whatever page we're on
-    if is_comment and comment_text:
+    if is_comment:
+        if not comment_text:
+            article_text = await cdp.js("document.querySelector('article, main')?.innerText?.substring(0,500) || document.title")
+            gen_resp = ask_model([{"role":"user","content":f"Write a thoughtful 2-3 sentence comment about this article. Just the comment text, nothing else:\n\n{article_text}"}])
+            comment_text = re.sub(r'<think>.*?</think>','',gen_resp,flags=re.DOTALL).strip().strip('"')
         print(f"\n  {BD}Auto-commenting on current page...{RS}")
         result = await cdp.post_comment(comment_text)
         print(f"  {result}")
