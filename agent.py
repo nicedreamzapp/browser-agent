@@ -233,34 +233,44 @@ def ask_model(messages):
     return "".join(b.get("text","") for b in result.get("content",[]) if b.get("type")=="text")
 
 def generate_comment(article_text):
-    """Generate a clean comment from article text. Handles Qwen's reasoning output."""
-    # Use system prompt for instruction, user message for article only
+    """Generate a clean comment from article text. Handles Qwen's verbose reasoning."""
     body = json.dumps({
-        "model": MODEL, "max_tokens": 200, "temperature": 0.7,
-        "system": "You write short news comments. Respond with ONLY 2-3 sentences commenting on the article. No quotes, no preamble, no reasoning, no labels. Just the comment as plain text.",
+        "model": MODEL, "max_tokens": 1024, "temperature": 0.7,
+        "system": "Comment on the news article. 2-3 sentences.",
         "messages": [{"role": "user", "content": article_text}]
     }).encode()
     req = urllib.request.Request(f"{MLX_URL}/v1/messages", data=body, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=60) as r:
         result = json.loads(r.read())
     raw = "".join(b.get("text", "") for b in result.get("content", []) if b.get("type") == "text")
-
-    # Clean Qwen's output
     text = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
 
-    # Remove any instruction echoing or reasoning
-    skip_prefixes = ('The user', 'I need', 'Let me', 'Here is', 'Here are', 'Thinking',
-                     'Output ONLY', 'You are writing', 'Article:', '1.', '2.', '3.', '*', '- ',
-                     'Okay', 'Sure', 'Alright', 'Comment:', 'My comment:')
-    lines = []
-    for line in text.split('\n'):
-        line = line.strip()
-        if not line: continue
-        if any(line.startswith(p) for p in skip_prefixes): continue
-        if line.startswith('"') and line.endswith('"'): line = line[1:-1]  # Remove quotes
-        lines.append(line)
+    # Qwen ALWAYS reasons out loud. Extract the actual comment from its output.
+    # It typically writes drafts like: *Draft 2:* Actual comment text here.
+    # Find ALL draft-like content and take the last/best one
+    drafts = re.findall(r'[Dd]raft\s*\d*[^:]*:\*?\s*(.+?)(?=\n\s*\*?\s*\*?(?:[DCcRrWw]|$))', text, re.DOTALL)
+    for d in reversed(drafts):
+        clean = re.sub(r'\*+', '', d).strip().strip('"')
+        if len(clean) > 40 and not clean.startswith(('Two ', 'Three ', 'Stronger', 'Fits', 'Addresses')):
+            return clean
 
-    return ' '.join(lines) if lines else "This is an important story that deserves more attention and discussion."
+    # Find quoted text (model sometimes puts final answer in quotes)
+    quoted = re.findall(r'"([^"]{40,}[.!?])"', text)
+    if quoted:
+        return quoted[-1]
+
+    # Find the last 2-3 complete sentences that aren't analysis
+    all_sentences = re.findall(r'([A-Z][^*\n\d]{25,}[.!?])', text)
+    # Filter out meta-sentences about the task
+    real = [s for s in all_sentences if not any(w in s.lower() for w in ['draft','constraint','sentence','critique','user','task','goal','checking','revised','output','format','plain text'])]
+    if real:
+        return ' '.join(real[-3:])
+
+    # Absolute fallback — just take last 2 sentences regardless
+    if all_sentences:
+        return ' '.join(all_sentences[-2:])
+
+    return "This situation raises serious concerns that demand greater transparency and accountability."
 
 
 def parse(text):
