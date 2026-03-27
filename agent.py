@@ -44,15 +44,34 @@ class CDP:
         self.ws = await websockets.connect(ws_url, max_size=50*1024*1024)
         for m in ["DOM.enable","Accessibility.enable","Page.enable","Runtime.enable"]: await self.cmd(m)
 
+    async def reconnect(self):
+        """Reconnect to the current active page after navigation."""
+        try:
+            if self.ws: await self.ws.close()
+        except: pass
+        await asyncio.sleep(1)
+        with urllib.request.urlopen(f"{CDP_URL}/json", timeout=5) as r:
+            pages = json.loads(r.read())
+        ws_url = next((p["webSocketDebuggerUrl"] for p in pages if p.get("type")=="page" and "devtools" not in p.get("url","")), None)
+        if ws_url:
+            self.ws = await websockets.connect(ws_url, max_size=50*1024*1024)
+            self.mid = 0
+            for m in ["DOM.enable","Accessibility.enable","Page.enable","Runtime.enable"]: await self.cmd(m)
+
     async def cmd(self, method, params=None):
         self.mid += 1
         msg = {"id":self.mid,"method":method}
         if params: msg["params"] = params
-        await self.ws.send(json.dumps(msg))
-        while True:
-            r = json.loads(await asyncio.wait_for(self.ws.recv(), timeout=30))
-            if r.get("id") == self.mid:
-                return r.get("result", r.get("error", {}))
+        try:
+            await self.ws.send(json.dumps(msg))
+            while True:
+                r = json.loads(await asyncio.wait_for(self.ws.recv(), timeout=30))
+                if r.get("id") == self.mid:
+                    return r.get("result", r.get("error", {}))
+        except Exception:
+            # Reconnect on broken connection (page navigated away)
+            await self.reconnect()
+            return {"error": "Connection lost, reconnected. Try again."}
 
     async def navigate(self, url):
         await self.cmd("Page.navigate", {"url": url}); await asyncio.sleep(3)
@@ -60,17 +79,22 @@ class CDP:
 
     async def snapshot(self):
         tree = await self.cmd("Accessibility.getFullAXTree", {"max_depth": 8})
+        nodes = tree.get("nodes", [])
         lines = []
-        for n in tree.get("nodes", [])[:400]:
+        # Prioritize actionable elements: links, buttons, inputs, headings
+        priority_roles = {"link","button","textbox","searchbox","heading","combobox","menuitem","checkbox","radio"}
+        for n in nodes:
             role = n.get("role",{}).get("value","")
             name = n.get("name",{}).get("value","")
             nid = n.get("nodeId","")
-            if role in ("none","generic","InlineTextBox") and not name: continue
-            p = [f"[{nid}]" if nid else "", role]
-            if name: p.append(f'"{name[:100]}"')
-            line = " ".join(x for x in p if x)
-            if line.strip(): lines.append(line)
-        return "\n".join(lines) if lines else "(Empty)"
+            if not name or len(name) < 3: continue
+            if role not in priority_roles and role != "StaticText": continue
+            # Skip StaticText unless it's substantial
+            if role == "StaticText" and len(name) < 30: continue
+            p = [f"[{nid}]", role, f'"{name[:120]}"']
+            lines.append(" ".join(p))
+            if len(lines) >= 200: break
+        return "\n".join(lines) if lines else "(Empty page)"
 
     async def click(self, uid):
         r = await self.cmd("DOM.resolveNode", {"backendNodeId": int(uid)})
@@ -118,35 +142,66 @@ class CDP:
         """})
         await asyncio.sleep(3)
 
-        # Step 2: Scroll to trigger lazy-loading
+        # Step 2: Scroll to trigger lazy-loading and wait for widget
         print(f"  {D}→ Loading comment widget...{RS}")
-        for i in range(5):
+        for i in range(8):
             await self.cmd("Runtime.evaluate",{"expression":"window.scrollBy(0,300)"})
-            await asyncio.sleep(1)
+            await asyncio.sleep(1.5)
 
-        # Step 3: Pierce ALL iframes + Shadow DOMs and search for editor
-        print(f"  {D}→ Searching for editor (pierce mode)...{RS}")
-        await self.cmd("DOM.getDocument",{"depth":-1,"pierce":True})
+        # Step 3: Connect to OpenWeb iframe target and use DOM.pierce there
+        print(f"  {D}→ Searching for comment iframe...{RS}")
+        for attempt in range(8):
+            with urllib.request.urlopen(f"{CDP_URL}/json",timeout=5) as r:
+                targets = json.loads(r.read())
+            ow = [t for t in targets if t.get("type")=="iframe"
+                  and any(k in t.get("url","") for k in ["openweb","spot.im","disqus","comment"])
+                  and t.get("webSocketDebuggerUrl")]
+            if ow: break
+            await self.cmd("Runtime.evaluate",{"expression":"window.scrollBy(0,300)"})
+            await asyncio.sleep(2)
+        else:
+            # No comment iframe found
+            pass
 
-        for selector in [".ProseMirror", "[contenteditable=true]", "textarea", "[role=textbox]"]:
-            r = await self.cmd("DOM.performSearch",{"query":selector,"includeUserAgentShadowDOM":True})
-            count = r.get("resultCount",0)
-            sid = r.get("searchId","")
+        if ow:
+            print(f"  {D}→ Found iframe, connecting...{RS}")
+            iws = await websockets.connect(ow[0]["webSocketDebuggerUrl"], max_size=50*1024*1024)
+            imid = [0]
+            async def isend(m,p=None):
+                imid[0]+=1; msg={"id":imid[0],"method":m}
+                if p: msg["params"]=p
+                await iws.send(json.dumps(msg))
+                while True:
+                    r=json.loads(await asyncio.wait_for(iws.recv(),timeout=15))
+                    if r.get("id")==imid[0]: return r.get("result",r.get("error",{}))
 
-            if count > 0:
-                results = await self.cmd("DOM.getSearchResults",{"searchId":sid,"fromIndex":0,"toIndex":count})
-                for nid in results.get("nodeIds",[]):
-                    fr = await self.cmd("DOM.focus",{"nodeId":nid})
-                    if "error" in fr: continue
-                    await asyncio.sleep(0.3)
+            for m in ["DOM.enable","Runtime.enable","Input.enable"]: await isend(m)
+            await isend("DOM.getDocument",{"depth":-1,"pierce":True})
 
-                    print(f"  {D}→ Typing comment ({len(text)} chars)...{RS}")
-                    await self.cmd("Input.insertText",{"text":text})
+            # Search inside the iframe (pierces Shadow DOM)
+            for attempt in range(3):
+                for selector in [".ProseMirror","[contenteditable=true]","textarea","[role=textbox]"]:
+                    r = await isend("DOM.performSearch",{"query":selector,"includeUserAgentShadowDOM":True})
+                    count = r.get("resultCount",0)
+                    sid = r.get("searchId","")
+                    if count > 0:
+                        results = await isend("DOM.getSearchResults",{"searchId":sid,"fromIndex":0,"toIndex":count})
+                        for nid in results.get("nodeIds",[]):
+                            fr = await isend("DOM.focus",{"nodeId":nid})
+                            if "error" in fr: continue
+                            await asyncio.sleep(0.3)
+                            print(f"  {D}→ Typing comment ({len(text)} chars)...{RS}")
+                            await isend("Input.insertText",{"text":text})
+                            if sid: await isend("DOM.discardSearchResults",{"searchId":sid})
+                            await iws.close()
+                            return f"{G}Comment drafted! ({len(text)} chars) — NOT posted, ready for review.{RS}"
+                    if sid: await isend("DOM.discardSearchResults",{"searchId":sid})
+                # Wait for SpotIM to render
+                await asyncio.sleep(3)
+                await isend("DOM.disable"); await isend("DOM.enable")
+                await isend("DOM.getDocument",{"depth":-1,"pierce":True})
 
-                    if sid: await self.cmd("DOM.discardSearchResults",{"searchId":sid})
-                    return f"{G}Comment drafted! ({len(text)} chars) — NOT posted, ready for review.{RS}"
-
-            if sid: await self.cmd("DOM.discardSearchResults",{"searchId":sid})
+            await iws.close()
 
         # Fallback: simple main-page textarea
         escaped = text.replace("\\","\\\\").replace("'","\\'").replace("\n","\\n")
@@ -209,7 +264,7 @@ async def run(task):
                 if len(comment_text) > 20: break
                 comment_text = None
 
-    messages = [{"role":"user","content":f"Task: {task}\n\nIMPORTANT: Find and click an article link. Do NOT scroll endlessly looking for comments — after clicking an article, just call done."}]
+    messages = [{"role":"user","content":f"Task: {task}\n\nRULES:\n- Navigate to the site, then snapshot to see the page.\n- Find article links in the snapshot — they have UIDs. Click one with click(uid).\n- After clicking an article and seeing the article page in the next snapshot, call done immediately.\n- Do NOT use the search bar. Do NOT scroll endlessly. Just find a link and click it.\n- If the snapshot shows article headlines, pick one and click its UID."}]
 
     for step in range(1, MAX_STEPS+1):
         t0=time.time(); resp=ask_model(messages); elapsed=time.time()-t0
