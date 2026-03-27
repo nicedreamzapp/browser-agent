@@ -313,13 +313,17 @@ async def run(task):
                 article_text = await cdp.js("document.querySelector('article, main, [role=main]')?.innerText?.substring(0,800) || document.title")
                 gen_resp = ask_model([{"role":"user","content":f"You are writing a comment on a news article. Output ONLY the comment text (2-3 sentences). No thinking, no explanation, no preamble. Just the comment.\n\nArticle:\n\n{article_text[:600]}"}])
                 comment_text = re.sub(r'<think>.*?</think>','',gen_resp,flags=re.DOTALL).strip().strip('"')
-                # If model included preamble, take only the last substantial paragraph
-                lines = [l.strip() for l in comment_text.split('\n') if l.strip() and not l.strip().startswith(('The user','I need','Let me','Here','I '))]
-                if lines:
-                    comment_text = ' '.join(lines[-3:])  # Last 3 non-preamble lines
-                # Cap at 500 chars for a reasonable comment
-                if len(comment_text) > 500:
-                    comment_text = comment_text[:497] + "..."
+                # Qwen dumps reasoning as plain text — extract just the comment
+                # Look for quoted text first (model often puts the comment in quotes)
+                quoted = re.findall(r'"([^"]{30,})"', comment_text)
+                if quoted:
+                    comment_text = quoted[0]
+                else:
+                    # Strip preamble lines
+                    lines = [l.strip() for l in comment_text.split('\n') if l.strip()
+                             and not any(l.strip().startswith(p) for p in ('The user','I need','Let me','Here is','Thinking','1.','2.','3.','*','- '))]
+                    if lines:
+                        comment_text = ' '.join(lines[-3:])
                 print(f"         {D}→ {comment_text[:80]}...{RS}")
 
             # Post comment
