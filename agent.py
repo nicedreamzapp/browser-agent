@@ -250,33 +250,24 @@ def generate_comment(article_text):
         result = json.loads(r.read())
     raw = "".join(b.get("text", "") for b in result.get("content", []) if b.get("type") == "text")
     text = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
+    text = re.sub(r'\*+', '', text)  # Remove markdown
 
-    # Qwen ALWAYS reasons out loud. Extract the actual comment from its output.
-    # It typically writes drafts like: *Draft 2:* Actual comment text here.
-    # Find ALL draft-like content and take the last/best one
-    drafts = re.findall(r'[Dd]raft\s*\d*[^:]*:\*?\s*(.+?)(?=\n\s*\*?\s*\*?(?:[DCcRrWw]|$))', text, re.DOTALL)
-    for d in reversed(drafts):
-        clean = re.sub(r'\*+', '', d).strip().strip('"')
-        if len(clean) > 40 and not clean.startswith(('Two ', 'Three ', 'Stronger', 'Fits', 'Addresses')):
-            return clean
+    # Qwen ALWAYS dumps reasoning. Extract only real comment sentences.
+    all_sentences = re.findall(r'([A-Z][^.!?]{20,}[.!?])', text)
 
-    # Find quoted text (model sometimes puts final answer in quotes)
-    quoted = re.findall(r'"([^"]{40,}[.!?])"', text)
-    if quoted:
-        return quoted[-1]
+    # Filter out meta-reasoning — NOT part of a real comment
+    meta = ['draft','constraint','sentence','critique','user','task','goal',
+            'checking','format','plain text','let me','let\'s','count',
+            'analyze','request','input','output','concise','polish',
+            'revised','alternative','stick to','meets','criteria',
+            'thinking','process','step','final','make sure']
+    real = [s.strip() for s in all_sentences
+            if not any(w in s.lower() for w in meta) and len(s) > 30]
 
-    # Find the last 2-3 complete sentences that aren't analysis
-    all_sentences = re.findall(r'([A-Z][^*\n\d]{25,}[.!?])', text)
-    # Filter out meta-sentences about the task
-    real = [s for s in all_sentences if not any(w in s.lower() for w in ['draft','constraint','sentence','critique','user','task','goal','checking','revised','output','format','plain text'])]
     if real:
         return ' '.join(real[-3:])
 
-    # Absolute fallback — just take last 2 sentences regardless
-    if all_sentences:
-        return ' '.join(all_sentences[-2:])
-
-    return "This situation raises serious concerns that demand greater transparency and accountability."
+    return "This situation raises serious concerns that demand greater transparency."
 
 
 def parse(text):
