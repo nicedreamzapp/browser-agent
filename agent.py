@@ -451,18 +451,32 @@ def main():
     # If args passed, run once
     if len(sys.argv) > 1:
         task = " ".join(sys.argv[1:])
-        print(); asyncio.run(run(task))
+        print()
+        try:
+            asyncio.run(run(task))
+        except Exception as e:
+            print(f"\n{R}Task failed: {type(e).__name__}: {e}{RS}")
         return
 
-    # Interactive loop — keep running tasks
+    # Interactive loop — keep running tasks. Catch ANY exception from a single
+    # task (MLX timeout, CDP websocket drop, bad model output, etc.) and loop
+    # back to the prompt instead of exiting — one bad task shouldn't kill the
+    # whole session.
     while True:
         try:
             task = input(f"\n{BD}What should I do?{RS} ")
-            if not task.strip(): continue
-            if task.strip().lower() in ("quit","exit","q"): break
-            print(); asyncio.run(run(task))
         except (KeyboardInterrupt, EOFError):
             print(f"\n{D}Bye!{RS}")
             break
+        if not task.strip(): continue
+        if task.strip().lower() in ("quit","exit","q"): break
+        print()
+        try:
+            asyncio.run(run(task))
+        except KeyboardInterrupt:
+            print(f"\n{Y}Task interrupted — back to prompt{RS}")
+        except Exception as e:
+            print(f"\n{R}Task failed: {type(e).__name__}: {e}{RS}")
+            print(f"{D}Back to prompt — try again or type 'quit' to exit{RS}")
 
 if __name__=="__main__": main()

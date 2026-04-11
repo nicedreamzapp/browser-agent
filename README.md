@@ -5,14 +5,15 @@ Autonomous browser agent running entirely on Apple Silicon. No cloud APIs, no Cl
 ## Architecture
 
 ```
-User prompt → Qwen 3.5 122B (MLX) → Chrome DevTools Protocol → Brave Browser
-                    ↑                          ↓
-              2-5s per step          DOM.pierce + DOM.focus
-                                     + Input.insertText
+User prompt → Local LLM (MLX) → Chrome DevTools Protocol → Brave Browser
+                   ↑                       ↓
+             ~2–5s per step        DOM.pierce + DOM.focus
+                                   + Input.insertText
 ```
 
-**Model**: Qwen 3.5 122B-A10B (4-bit quantized) via MLX on Apple Silicon
-**Browser**: Brave with remote debugging (port 9222)
+**Default model**: Gemma 4 31B Instruct abliterated (4-bit quantized) via MLX on Apple Silicon
+**Alternative models**: any MLX-compatible model — Qwen 3.5 122B (biggest), Llama 3.3 70B (smartest), or anything else — swap via the `MLX_MODEL` env var
+**Browser**: Brave with remote debugging on port 9222
 **Protocol**: CDP WebSocket — no MCP, no proxy, direct connection
 
 ## Key Innovation: Cross-Origin Iframe + Shadow DOM Commenting
@@ -29,8 +30,8 @@ Standard browser automation tools (Playwright, Selenium, MCP) fail at all three 
 ```
 DOM.getDocument(depth: -1, pierce: true)    # Exposes everything across iframes + Shadow DOM
 DOM.performSearch(".ProseMirror")            # Finds the editor in any context
-DOM.focus(nodeId)                           # Focuses it regardless of origin
-Input.insertText(text)                      # Types into the focused element
+DOM.focus(nodeId)                            # Focuses it regardless of origin
+Input.insertText(text)                       # Types into the focused element
 ```
 
 This works because CDP operates at the **browser level**, not the page level. Same-origin policy doesn't apply.
@@ -38,32 +39,30 @@ This works because CDP operates at the **browser level**, not the page level. Sa
 ## Setup
 
 ### Prerequisites
-- macOS with Apple Silicon (M-series)
+- macOS with Apple Silicon (M-series), 32 GB+ unified memory recommended
 - Brave Browser (or Chrome) with remote debugging
 - Python 3.12+ with MLX
 
 ### Install
 
 ```bash
-# MLX server (handles Qwen 3.5 inference)
-pip install mlx mlx-lm
-
-# Agent dependency
-pip install websockets
-
-# Start Brave with remote debugging
-open -a "Brave Browser" --args --remote-debugging-port=9222
+# MLX server backend (handles local inference)
+pip install mlx mlx-lm websockets
 ```
 
 ### MLX Server
 
-The agent talks to an MLX inference server that speaks Anthropic's Messages API:
+The agent talks to a local MLX inference server that speaks Anthropic's Messages API.
+The server ships with the companion repo [claude-code-local](https://github.com/nicedreamzapp/claude-code-local) — set that up first. Once installed, the server lives at `~/.local/mlx-native-server/server.py` and is auto-started by the desktop launcher.
 
-```bash
-# Start the server (loads Qwen 3.5 122B)
-python ~/.local/mlx-native-server/server.py
-# Serves on http://localhost:4000
-```
+### Launcher
+
+Desktop launcher: double-click `Gemma 4 Browser.command` (from the claude-code-local repo's `launchers/Browser Agent.command`). The launcher will:
+
+1. Start the MLX server with Gemma 4 31B if it isn't already running
+2. Start Brave with `--remote-debugging-port=9222` if it isn't already running
+3. Ensure at least one page tab exists
+4. Hand off to the Python agent
 
 ## Usage
 
@@ -71,8 +70,10 @@ python ~/.local/mlx-native-server/server.py
 ```bash
 python agent.py
 # Prompts: "What should I do?"
-# Type tasks, get results, stays open for next task
+# Type tasks, get results, stays open for the next task
 # Type "quit" to exit
+# Errors in one task no longer kill the whole session — you'll just get a
+# message and a fresh prompt
 ```
 
 ### One-Shot Mode
@@ -80,21 +81,25 @@ python agent.py
 python agent.py "Find an article about Iran on Yahoo and make a comment"
 ```
 
-### Desktop Launcher
-Double-click `Browser Agent.command` on Desktop. Starts MLX server + Brave if needed.
+### Swap Models
+```bash
+# Override the default model with any MLX-compatible LLM
+MLX_MODEL="mlx-community/Qwen2.5-72B-Instruct-4bit" python agent.py
+```
 
 ## Example Tasks
 
 ### Comment on a news article
 ```
-Find an article about Iran on Yahoo and make a comment. Don't post it, just leave in draft.
+Find an article about Iran on Yahoo and make a comment. Don't post it, just leave it in draft.
 ```
+
 The agent will:
 1. Navigate to Yahoo News
 2. Find an Iran article via JavaScript (instant, no model needed)
 3. Click the article
 4. Read the article content (first 6 paragraphs)
-5. Generate a relevant 2-3 sentence comment using the model
+5. Generate a relevant 2–3 sentence comment using the model
 6. Open the Comments section
 7. Find the comment widget (cross-origin iframe + Shadow DOM)
 8. Type the comment via DOM.pierce + DOM.focus + Input.insertText
@@ -109,10 +114,10 @@ Go to Yahoo, find an Iran article. comment: The diplomatic situation demands mor
 ## How It Works
 
 ### Fast Path (comment tasks)
-When the task mentions "comment" + a topic keyword (iran, trump, etc.):
+When the task mentions "comment" plus a topic keyword (iran, trump, etc.):
 1. **JavaScript finds the article** — no model needed, instant
-2. **Model generates comment** — reads article paragraphs, writes 2-3 sentences
-3. **CDP types the comment** — pierce through iframes + Shadow DOM
+2. **Model generates the comment** — reads article paragraphs, writes 2–3 sentences
+3. **CDP types the comment** — pierces through iframes and Shadow DOM
 
 ### General Path (other tasks)
 The model controls the browser via JSON tool calls:
@@ -121,17 +126,15 @@ The model controls the browser via JSON tool calls:
 - `click(uid)` — click an element
 - `type_text(uid, text)` — type into an element
 - `scroll(direction)` — scroll up/down
-- `js(code)` — run JavaScript
+- `js(code)` — run arbitrary JavaScript
 - `done(message)` — task complete
 
-### Comment Text Extraction
-Qwen 3.5 outputs verbose reasoning (drafts, critiques, analysis) as plain text. The agent filters this to extract only the clean comment:
-- Strips `<think>` tags
-- Removes markdown formatting
-- Filters sentences containing meta-words (draft, constraint, analyze, etc.)
-- Takes the last 2-3 real sentences (model's final/best output)
+Built-in loop detection: if the same UID gets clicked more than twice in a row, the agent presses Escape (to dismiss any lightbox/overlay) and forces a fresh snapshot so the model can try a different approach.
 
-## Performance
+### Error Recovery
+Any exception during a task (MLX timeout, CDP websocket drop, malformed model output, etc.) is caught by the main loop — you'll see the error printed and return to the prompt rather than the whole agent crashing.
+
+## Performance (Gemma 4 31B on M-series, warm disk cache)
 
 | Metric | Value |
 |--------|-------|
@@ -139,17 +142,17 @@ Qwen 3.5 outputs verbose reasoning (drafts, critiques, analysis) as plain text. 
 | Article finding (JS) | <1s |
 | Comment generation | ~8s |
 | Comment typing (pierce + type) | ~3s |
-| **Total for comment task** | **~20-30s** |
+| **Total for comment task** | **~20–30s** |
 
 ## Files
 
-- `agent.py` — The browser agent (single file, ~300 lines)
-- `~/.local/mlx-native-server/server.py` — MLX inference server with Anthropic API + tool parsing
-- `~/Desktop/Browser Agent.command` — Desktop launcher
+- `agent.py` — The browser agent (single file, ~470 lines)
+- `~/.local/mlx-native-server/server.py` — MLX inference server with Anthropic API + tool parsing (ships with [claude-code-local](https://github.com/nicedreamzapp/claude-code-local))
+- `launchers/Browser Agent.command` — Desktop launcher (ships with [claude-code-local](https://github.com/nicedreamzapp/claude-code-local), surfaces as `Gemma 4 Browser.command` on the Desktop)
 
 ## Built With
 
 - [MLX](https://github.com/ml-explore/mlx) — Apple's ML framework for Apple Silicon
-- [Qwen 3.5 122B](https://huggingface.co/mlx-community/Qwen3.5-122B-A10B-4bit) — 4-bit quantized LLM
+- [Gemma 4 31B](https://huggingface.co/google/gemma-4-31b-it) — instruction-tuned, abliterated and 4-bit quantized
 - Chrome DevTools Protocol — direct browser control via WebSocket
 - No cloud APIs, no subscriptions, no data leaving your machine
