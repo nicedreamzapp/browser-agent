@@ -27,7 +27,12 @@ TOOLS:
 - done(message) — Task complete
 
 FORMAT: {"tool": "name", "args": {...}}
-RULES: After navigate, always snapshot. Be fast. No explanations, just JSON."""
+RULES:
+- After navigate, always snapshot. Be fast. No explanations, just JSON.
+- NEVER click the same UID more than twice. If it didn't work, try a different approach.
+- If a click opens an image/lightbox overlay, use js(code) to close it: document.querySelector('[class*=close], [aria-label*=Close], .lightbox')?.click() or press Escape via js(code): document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))
+- If the page looks the same after clicking, do NOT repeat. Try: scroll, navigate to a direct URL, or use js(code) to interact.
+- On Reddit: image posts open lightboxes. Close them first. To find the comment box, scroll down and look for a textbox or use js(code) to find it."""
 
 # ─── CDP ─────────────────────────────────────────────────────────────────────
 
@@ -362,6 +367,8 @@ async def run(task):
             print(f"         {D}→ No article found with topic '{topic}', falling back to model{RS}")
 
     messages = [{"role":"user","content":f"Task: {task}\n\nRULES:\n- Navigate to the site, then snapshot.\n- Find article links and click one.\n- After reaching an article page, call done immediately."}]
+    click_counts = {}  # Track how many times each UID is clicked
+    last_snapshot = ""  # Track last snapshot to detect stuck state
 
     for step in range(1, MAX_STEPS+1):
         t0=time.time(); resp=ask_model(messages); elapsed=time.time()-t0
@@ -373,11 +380,31 @@ async def run(task):
             continue
 
         tool=tc.get("tool",""); args=tc.get("args",{})
+
+        # ─── Loop Detection ─────────────────────────────────────────
+        if tool == "click":
+            uid = str(args.get("uid", ""))
+            click_counts[uid] = click_counts.get(uid, 0) + 1
+            if click_counts[uid] > 2:
+                print(f"  {Y}Step {step} LOOP DETECTED: uid {uid} clicked {click_counts[uid]} times — forcing Escape + snapshot{RS}")
+                # Auto-recover: press Escape (closes lightboxes/overlays), then force a snapshot
+                await cdp.js("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))")
+                await asyncio.sleep(0.5)
+                r = await cdp.snapshot()
+                messages.append({"role":"assistant","content":json.dumps({"tool":"js","args":{"code":"Escape"}})})
+                messages.append({"role":"user","content":f"Result: LOOP DETECTED — you clicked uid {uid} {click_counts[uid]} times. The page hasn't changed. I pressed Escape to close any overlay. Here is a fresh snapshot — try a DIFFERENT approach:\n\n{r[:3000]}"})
+                continue
+
         args_s=', '.join(f'{k}={repr(v)[:40]}' for k,v in args.items())
         print(f"  {D}Step {step}{RS} {B}{tool}{RS}({args_s}) {D}{elapsed:.1f}s{RS}")
 
         if tool=="navigate": r=await cdp.navigate(args.get("url",""))
-        elif tool=="snapshot": r=await cdp.snapshot()
+        elif tool=="snapshot":
+            r=await cdp.snapshot()
+            # Detect stuck state: snapshot looks the same as last time
+            if last_snapshot and r == last_snapshot:
+                r = r + "\n\n⚠️ WARNING: This snapshot is IDENTICAL to the previous one. The page has NOT changed. Try a different approach — scroll, press Escape, or navigate to a different URL."
+            last_snapshot = r
         elif tool=="click": r=await cdp.click(str(args.get("uid","")))
         elif tool=="type_text": r=await cdp.type_into(str(args.get("uid","")),args.get("text",""))
         elif tool=="scroll": r=await cdp.scroll(args.get("direction","down"))
