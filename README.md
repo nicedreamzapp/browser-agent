@@ -1,5 +1,7 @@
 # Local Browser Agent
 
+[![GitHub stars](https://img.shields.io/github/stars/nicedreamzapp/browser-agent?style=for-the-badge&logo=github&color=f5c542&labelColor=1f2328)](https://github.com/nicedreamzapp/browser-agent/stargazers)
+
 Autonomous browser agent running entirely on Apple Silicon. No cloud APIs, no Claude Code overhead, no MCP layer. Direct MLX inference + Chrome DevTools Protocol.
 
 ## Architecture
