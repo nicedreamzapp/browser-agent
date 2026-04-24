@@ -1,6 +1,7 @@
 # Local Browser Agent
 
 [![GitHub stars](https://img.shields.io/github/stars/nicedreamzapp/browser-agent?style=for-the-badge&logo=github&color=f5c542&labelColor=1f2328)](https://github.com/nicedreamzapp/browser-agent/stargazers)
+[![Join the NiceDreamzApps Discord](https://img.shields.io/discord/1497121921580404818?label=NiceDreamzApps&logo=discord&color=5865F2&style=for-the-badge)](https://discord.gg/ZdSqgAxUW)
 
 Autonomous browser agent running entirely on Apple Silicon. No cloud APIs, no Claude Code overhead, no MCP layer. Direct MLX inference + Chrome DevTools Protocol.
 
@@ -158,3 +159,9 @@ Any exception during a task (MLX timeout, CDP websocket drop, malformed model ou
 - [Gemma 4 31B](https://huggingface.co/google/gemma-4-31b-it) — instruction-tuned, abliterated and 4-bit quantized
 - Chrome DevTools Protocol — direct browser control via WebSocket
 - No cloud APIs, no subscriptions, no data leaving your machine
+
+## 💬 Community
+
+Builders running this stack hang out in the NiceDreamzApps Discord — quiet, builder-tone, no bots. Share what you're scraping, what's breaking, what local model worked for which site.
+
+👉 **[discord.gg/ZdSqgAxUW](https://discord.gg/ZdSqgAxUW)**
