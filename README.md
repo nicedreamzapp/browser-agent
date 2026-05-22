@@ -1,5 +1,14 @@
 # Local Browser Agent
 
+<p align="center">
+  <a href="https://youtu.be/SIuMNa2k6Wc">
+    <img src="https://img.youtube.com/vi/SIuMNa2k6Wc/maxresdefault.jpg" width="640" alt="Local AI browser agent demo">
+  </a>
+  <br>
+  <em>▶ Watch the demo on YouTube</em>
+</p>
+
+
 [![GitHub stars](https://img.shields.io/github/stars/nicedreamzapp/browser-agent?style=for-the-badge&logo=github&color=f5c542&labelColor=1f2328)](https://github.com/nicedreamzapp/browser-agent/stargazers)
 [![Join the NiceDreamzApps Discord](https://img.shields.io/discord/1497121921580404818?label=NiceDreamzApps&logo=discord&color=5865F2&style=for-the-badge)](https://discord.gg/ZdSqgAxUW)
 
