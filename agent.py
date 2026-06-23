@@ -4,35 +4,303 @@ Local Browser Agent — Direct MLX + Chrome DevTools Protocol.
 Handles iframes, Shadow DOM, ProseMirror editors automatically.
 """
 
-import json, os, re, sys, time, asyncio, websockets, urllib.request
+import json, os, re, sys, time, asyncio, subprocess, websockets, urllib.request
+
+_MOBILE_FLAG = os.path.expanduser("~/.claude/imessage-agent-on")
+_IMSG_SEND = os.path.expanduser("~/.claude/imessage-send.sh")
+
+_IMSG_SEND_IMG = os.path.expanduser("~/.claude/imessage-send-image.sh")
+_IMSG_SEND_VID = os.path.expanduser("~/.claude/imessage-send-video.sh")
+_DL_DIR = os.path.expanduser("~/Downloads/gemma-agent")
+
+# Hosts whose image URLs are almost always tiny thumbnails or data-URI stubs —
+# sending these results in fuzzy, useless previews on the phone.
+_BAD_IMAGE_HOSTS = (
+    "encrypted-tbn0.gstatic.com",
+    "encrypted-tbn1.gstatic.com",
+    "encrypted-tbn2.gstatic.com",
+    "encrypted-tbn3.gstatic.com",
+)
+
+# Per-process set of URLs/paths we've already sent, to stop the model from
+# shipping the same picture twice when it gets confused about what it did.
+_ALREADY_SENT = set()
+
+def _text_phone(msg: str) -> None:
+    """If iMessage mobile mode is on, forward a short summary to Matt's phone."""
+    if not os.path.exists(_MOBILE_FLAG):
+        return
+    msg = (msg or "").strip()
+    if len(msg) > 500:
+        msg = msg[:497] + "..."
+    try:
+        subprocess.Popen(
+            ["/bin/bash", _IMSG_SEND, msg],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+def _download(url: str, ext_hint: str = "") -> str:
+    """Download a URL (including data: URIs) to _DL_DIR and return the local path."""
+    os.makedirs(_DL_DIR, exist_ok=True)
+    import hashlib, base64, mimetypes
+    if url.startswith("data:"):
+        header, b64 = url.split(",", 1)
+        mime = header.split(";")[0][5:] or "image/jpeg"
+        ext = mimetypes.guess_extension(mime) or ".jpg"
+        data = base64.b64decode(b64)
+        name = hashlib.md5(url[:200].encode()).hexdigest()[:10] + ext
+        path = os.path.join(_DL_DIR, name)
+        with open(path, "wb") as f: f.write(data)
+        return path
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        data = r.read()
+        ctype = r.headers.get("Content-Type", "").split(";")[0].strip()
+    ext = ext_hint or mimetypes.guess_extension(ctype) or ".jpg"
+    if not ext.startswith("."): ext = "." + ext
+    name = hashlib.md5(url.encode()).hexdigest()[:10] + ext
+    path = os.path.join(_DL_DIR, name)
+    with open(path, "wb") as f: f.write(data)
+    return path
+
+def _send_media_to_phone(url_or_path: str, kind: str = "image") -> str:
+    """Download if URL, then send via the right iMessage script. Returns status."""
+    if not os.path.exists(_MOBILE_FLAG):
+        return "mobile mode is off"
+    if not url_or_path:
+        return "empty URL — provide a direct image URL"
+
+    # Block junk thumbnail hosts — these are always fuzzy and useless.
+    if kind == "image" and any(h in url_or_path for h in _BAD_IMAGE_HOSTS):
+        return ("refused: that's a Google Images thumbnail (tiny/fuzzy). "
+                "Use a direct image URL from Unsplash, LoremFlickr, Wikipedia, or Pexels instead.")
+
+    # Dedupe: don't re-send the same URL in the same session.
+    if url_or_path in _ALREADY_SENT:
+        return "already sent this one — pick a different URL"
+
+    try:
+        if url_or_path.startswith(("http://", "https://", "data:")):
+            path = _download(url_or_path)
+        else:
+            path = os.path.expanduser(url_or_path)
+        # Reject garbage downloads (HTML error pages, 0-byte files).
+        if not os.path.exists(path) or os.path.getsize(path) < 5000:
+            return f"failed: download too small ({os.path.getsize(path) if os.path.exists(path) else 0} bytes) — not a real image"
+        script = _IMSG_SEND_VID if kind == "video" else _IMSG_SEND_IMG
+        subprocess.Popen(
+            ["/bin/bash", script, path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        _ALREADY_SENT.add(url_or_path)
+        _ALREADY_SENT.add(path)
+        return f"sent {os.path.basename(path)} ({_ALREADY_SENT.__len__() // 2} total this session)"
+    except Exception as e:
+        return f"failed: {type(e).__name__}: {e}"
+
+async def _cdp_screenshot(cdp, path: str) -> str:
+    """Capture a PNG of the current Brave page and save it."""
+    import base64
+    r = await cdp.cmd("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False})
+    b64 = r.get("result", {}).get("data") or r.get("data", "")
+    if not b64: return ""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f: f.write(base64.b64decode(b64))
+    return path
+
+def _full_screenshot(path: str) -> str:
+    """Capture the whole Mac desktop (all displays) via `screencapture`."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    subprocess.run(["/usr/sbin/screencapture", "-x", path], check=False, timeout=10)
+    return path if os.path.exists(path) and os.path.getsize(path) > 1000 else ""
+
+# ─── General-purpose system tools (shell, files) ────────────────────────────
+
+def _tool_shell(cmd: str, timeout: int = 60) -> str:
+    """Run a bash command. Returns stdout+stderr (truncated)."""
+    if not cmd:
+        return "empty command"
+    try:
+        r = subprocess.run(
+            ["/bin/bash", "-lc", cmd],
+            capture_output=True, text=True, timeout=timeout,
+            cwd=os.path.expanduser("~"),
+        )
+        out = (r.stdout or "") + (r.stderr or "")
+        out = out.strip() or f"(exit {r.returncode}, no output)"
+        if len(out) > 3500:
+            out = out[:3500] + f"\n...(truncated, exit {r.returncode})"
+        else:
+            out = out + (f"\n(exit {r.returncode})" if r.returncode != 0 else "")
+        return out
+    except subprocess.TimeoutExpired:
+        return f"timed out after {timeout}s"
+    except Exception as e:
+        return f"shell error: {type(e).__name__}: {e}"
+
+def _tool_read_file(path: str, max_bytes: int = 8000) -> str:
+    path = os.path.expanduser(path)
+    if not os.path.exists(path):
+        return f"no such file: {path}"
+    if os.path.isdir(path):
+        try:
+            entries = sorted(os.listdir(path))
+        except Exception as e:
+            return f"cannot list: {e}"
+        return "DIR " + path + ":\n" + "\n".join(entries[:200])
+    try:
+        with open(path, "rb") as f:
+            data = f.read(max_bytes + 1)
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return f"binary file, {os.path.getsize(path)} bytes"
+        if len(data) > max_bytes:
+            text = text[:max_bytes] + "\n...(truncated)"
+        return text
+    except Exception as e:
+        return f"read error: {type(e).__name__}: {e}"
+
+def _tool_write_file(path: str, content: str) -> str:
+    path = os.path.expanduser(path)
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content or "")
+        return f"wrote {len(content or '')} chars to {path}"
+    except Exception as e:
+        return f"write error: {type(e).__name__}: {e}"
+
+# ─── Studio Record (Matt's local screen recorder API on :17494) ──────────────
+_STUDIO_API = "http://127.0.0.1:17494"
+_STUDIO_DIR = os.path.expanduser("~/Desktop/Screen Recordings")
+_STUDIO_LAUNCHER = os.path.join(_STUDIO_DIR, "studio_record.py")
+_STUDIO_VENV_PY = os.path.join(_STUDIO_DIR, ".venv/bin/python")
+
+def _studio_up() -> bool:
+    try:
+        urllib.request.urlopen(f"{_STUDIO_API}/status", timeout=2)
+        return True
+    except Exception:
+        return False
+
+def _studio_ensure_running() -> None:
+    if _studio_up():
+        return
+    if os.path.exists(_STUDIO_VENV_PY) and os.path.exists(_STUDIO_LAUNCHER):
+        subprocess.Popen(
+            [_STUDIO_VENV_PY, _STUDIO_LAUNCHER],
+            cwd=_STUDIO_DIR,
+            stdout=open("/tmp/studio_record.log", "a"),
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        # Wait up to ~6s for the API to come up
+        for _ in range(12):
+            time.sleep(0.5)
+            if _studio_up():
+                break
+
+def _studio_start(mode: str = "screen") -> str:
+    _studio_ensure_running()
+    try:
+        req = urllib.request.Request(f"{_STUDIO_API}/start?mode={mode}", method="POST")
+        urllib.request.urlopen(req, timeout=5).read()
+        return f"recording ({mode})"
+    except Exception as e:
+        return f"start failed: {e}"
+
+def _studio_stop_and_send(send: bool = True) -> str:
+    try:
+        req = urllib.request.Request(f"{_STUDIO_API}/stop", method="POST")
+        urllib.request.urlopen(req, timeout=10).read()
+    except Exception as e:
+        return f"stop failed: {e}"
+    # Find the newest .mp4 in the Screen Recordings folder
+    try:
+        mp4s = [
+            os.path.join(_STUDIO_DIR, f) for f in os.listdir(_STUDIO_DIR)
+            if f.lower().endswith(".mp4")
+        ]
+        if not mp4s:
+            return "stopped but no .mp4 found"
+        newest = max(mp4s, key=os.path.getmtime)
+        if send and os.path.exists(_MOBILE_FLAG):
+            subprocess.Popen(
+                ["/bin/bash", _IMSG_SEND_VID, newest],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            return f"stopped + texting {os.path.basename(newest)}"
+        return f"stopped: {newest}"
+    except Exception as e:
+        return f"stopped but send failed: {e}"
+
+def _studio_status() -> str:
+    try:
+        with urllib.request.urlopen(f"{_STUDIO_API}/status", timeout=3) as r:
+            return r.read().decode("utf-8", "ignore")[:300]
+    except Exception as e:
+        return f"studio not reachable: {e}"
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
 MLX_URL = os.environ.get("MLX_URL", "http://localhost:4000")
 CDP_URL = os.environ.get("CDP_URL", "http://127.0.0.1:9222")
 MODEL = os.environ.get("MLX_MODEL_NAME", "claude-sonnet-4-6")
-MAX_STEPS = int(os.environ.get("MAX_STEPS", "15"))
+MAX_STEPS = int(os.environ.get("MAX_STEPS", "30"))
 
 B, G, Y, R, D, BD, RS = "\033[94m", "\033[92m", "\033[93m", "\033[91m", "\033[2m", "\033[1m", "\033[0m"
 
-SYSTEM = """You are a browser agent. Return ONE JSON tool call per response.
+SYSTEM = """You are a general-purpose agent that helps the user accomplish ANY task — web work, code editing, shell commands, file reads/writes, running builds, deploying, sending media. Return ONE JSON tool call per response.
 
-TOOLS:
+TOOLS (browser):
 - navigate(url) — Go to URL
-- snapshot() — Get page elements with UIDs. Always do after navigate/click.
-- click(uid) — Click element
-- type_text(uid, text) — Type into element
+- snapshot() — Get page elements with UIDs. You RARELY need this: after navigate/click/type_text/scroll the fresh page is attached to the result automatically. Only call snapshot if you genuinely need to re-check the page without taking an action.
+- click(uid) — Click element by UID from snapshot
+- type_text(uid, text) — Type into a text field by UID
 - scroll(direction) — "up" or "down"
-- js(code) — Run JavaScript
-- done(message) — Task complete
+- js(code) — Run JavaScript on the page. Return a VALUE (e.g. array of URLs).
+
+TOOLS (system — use these for coding/building/deploy tasks):
+- shell(cmd, timeout?) — Run any bash command on the Mac. Default cwd = $HOME. Use for: git, ssh, curl, wp-cli, python, npm, file ops, greps, finding files, running scripts, anything the user could type. DEFAULT FIRST CHOICE for non-web work.
+- read_file(path) — Read a text file (or list a directory). Tilde (~) expands.
+- write_file(path, content) — Overwrite a file with content. Creates parent dirs.
+
+TOOLS (media to user's phone — requires mobile mode on):
+- screenshot() — Capture the current Brave page as PNG and text it
+- fullscreen_shot() — Capture the WHOLE Mac desktop (all displays) and text it
+- send_image(url) — Download an image URL and text it
+- send_video(url) — Download a video URL and text it
+- record_start(mode) — Start Studio Record. mode = "screen" / "face" / "screen_face"
+- record_stop() — Stop Studio Record and auto-text the .mp4
+
+- done(message) — Task complete. Use this for conversational replies too (e.g. if the user asks "why did you X", answer via done()).
 
 FORMAT: {"tool": "name", "args": {...}}
 RULES:
-- After navigate, always snapshot. Be fast. No explanations, just JSON.
-- NEVER click the same UID more than twice. If it didn't work, try a different approach.
-- If a click opens an image/lightbox overlay, use js(code) to close it: document.querySelector('[class*=close], [aria-label*=Close], .lightbox')?.click() or press Escape via js(code): document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))
-- If the page looks the same after clicking, do NOT repeat. Try: scroll, navigate to a direct URL, or use js(code) to interact.
-- On Reddit: image posts open lightboxes. Close them first. To find the comment box, scroll down and look for a textbox or use js(code) to find it."""
+- FOLLOW THE USER'S TASK EXACTLY. Do what they asked — nothing else.
+- PICK THE RIGHT TOOL FAMILY FIRST: if the task involves code/files/deploy/shell → use shell/read_file/write_file. Don't open a browser for things the terminal handles in one command.
+- After navigate/click/type_text/scroll the new page state is ALREADY attached to the result — read it and act. Do NOT call snapshot as a separate step.
+- Use snapshot UIDs to find the right elements — read the labels/text carefully.
+- For forms: snapshot to find fields, type_text to fill them, click to submit.
+- For navigation: click links/buttons that match what the user wants.
+- NEVER click the same UID more than twice. Try a different approach.
+- If the page hasn't changed after an action, try: scroll, js(code), or a different element.
+- "Send image/photo/picture to my phone" — use send_image(url) with a REAL image URL.
+  * **NEVER send URLs from encrypted-tbnN.gstatic.com** — those are Google Images thumbnails and show up fuzzy on the phone. The tool will reject them.
+  * GOOD direct-image sources to navigate to FIRST, then scrape real src URLs:
+    - https://loremflickr.com/1080/1350/KEYWORDS?lock=N   (one URL per lock number, no page visit needed)
+    - https://unsplash.com/s/photos/KEYWORDS
+    - https://commons.wikimedia.org/w/index.php?search=KEYWORDS
+  * If the user asks for N pictures, send EXACTLY N distinct images. Count each successful send and STOP when you hit N.
+  * Re-sending the same URL is rejected — if you see "already sent this one," move to a different URL.
+- "Send screenshot" / "send me what the page looks like" = screenshot() (current Brave tab only).
+- "Screenshot of my desktop / everything / the whole screen" = fullscreen_shot().
+- "Record my screen" / "take a video of X" — record_start("screen"), do the thing, record_stop() (auto-texts the mp4).
+- Do NOT call done until the user's task is actually finished. If the user asks a conversational question ("why did you..."), answer with done() — don't navigate.
+- No explanations — just JSON tool calls."""
 
 # ─── CDP ─────────────────────────────────────────────────────────────────────
 
@@ -78,8 +346,31 @@ class CDP:
             await self.reconnect()
             return {"error": "Connection lost, reconnected. Try again."}
 
+    async def wait_ready(self, want_origin=None, cap=6.0):
+        """Poll until the page is done loading, instead of always sleeping a
+        fixed amount. Returns as soon as readyState is 'complete' (fast pages
+        ~0.5s) or bails out at `cap` seconds. When navigating, `want_origin`
+        guards against returning while the OLD page is still showing — we wait
+        until the new origin is actually in effect before calling it ready."""
+        await asyncio.sleep(0.3)  # let the navigation actually begin
+        deadline = time.time() + cap
+        while time.time() < deadline:
+            r = await self.cmd("Runtime.evaluate", {"expression": "JSON.stringify([document.readyState, location.href])", "returnByValue": True})
+            try:
+                state, href = json.loads(r.get("result", {}).get("value", "") or "[]")
+            except Exception:
+                state, href = "", ""
+            url_ok = (want_origin is None) or href.lower().startswith(want_origin) or href == "about:blank"
+            if state == "complete" and url_ok:
+                return
+            await asyncio.sleep(0.2)
+
     async def navigate(self, url):
-        await self.cmd("Page.navigate", {"url": url}); await asyncio.sleep(3)
+        from urllib.parse import urlparse
+        await self.cmd("Page.navigate", {"url": url})
+        p = urlparse(url)
+        want_origin = f"{p.scheme}://{p.netloc}".lower() if p.scheme and p.netloc else None
+        await self.wait_ready(want_origin)
         return f"Navigated to {url}"
 
     async def snapshot(self):
@@ -102,6 +393,7 @@ class CDP:
         return "\n".join(lines) if lines else "(Empty page)"
 
     async def click(self, uid):
+        uid = str(uid).strip("[]")
         r = await self.cmd("DOM.resolveNode", {"backendNodeId": int(uid)})
         if "error" in r: return f"Error: {r['error']}"
         oid = r.get("object",{}).get("objectId")
@@ -302,71 +594,7 @@ async def run(task):
     cdp = CDP(); await cdp.connect()
     print(f"{G}Connected to Brave{RS}\n")
 
-    # Detect if this is a comment task
-    is_comment = any(w in task.lower() for w in ["comment","draft","reply"])
-    comment_text = None
-    if is_comment:
-        for marker in ["draft:","comment:","text:"]:
-            idx = task.lower().rfind(marker)
-            if idx >= 0:
-                comment_text = task[idx+len(marker):].strip().rstrip(".")
-                if len(comment_text) > 20: break
-                comment_text = None
-
-    # Extract topic keywords for smart navigation
-    topic_words = []
-    for word in ["iran","trump","war","ukraine","china","russia","gaza","israel","economy","oil"]:
-        if word in task.lower(): topic_words.append(word)
-
-    # FAST PATH: If this is a "go to site + find article + comment" task, skip the model for navigation
-    if is_comment and topic_words:
-        topic = " ".join(topic_words)
-        # Detect which site
-        site_url = "https://news.yahoo.com"
-        for site in ["yahoo","reddit","cnn","bbc","nytimes"]:
-            if site in task.lower():
-                if site == "yahoo": site_url = "https://news.yahoo.com"
-                elif site == "reddit": site_url = "https://www.reddit.com"
-                break
-
-        print(f"  {D}Step 1{RS} {B}navigate{RS}({site_url})")
-        await cdp.navigate(site_url)
-
-        print(f"  {D}Step 2{RS} {B}find article{RS}(topic='{topic}')")
-        r = await cdp.js(f"""
-            const links = Array.from(document.querySelectorAll('a'));
-            const article = links.find(a => {{
-                const text = a.textContent.toLowerCase();
-                const href = a.href || '';
-                return text.length > 30 && (href.includes('article') || href.includes('/news/'))
-                    && {' && '.join(f'text.includes("{w}")' for w in topic_words)};
-            }});
-            if(article) {{ article.click(); article.textContent.trim().substring(0,100) }}
-            else {{ 'NOT_FOUND' }}
-        """)
-
-        if r and r != "NOT_FOUND":
-            print(f"         {D}→ {r[:80]}{RS}")
-            await asyncio.sleep(3)
-
-            # Generate comment if needed
-            if not comment_text:
-                print(f"  {D}Step 3{RS} {B}generate comment{RS}")
-                article_text = await cdp.js("document.title + '. ' + Array.from(document.querySelectorAll('p')).map(p=>p.innerText).filter(t=>t.length>40).slice(0,6).join(' ')")
-                comment_text = generate_comment(article_text[:600])
-                print(f"         {D}→ {comment_text[:80]}...{RS}")
-
-            # Post comment
-            print(f"  {D}Step 4{RS} {B}post comment{RS}")
-            result = await cdp.post_comment(comment_text)
-            print(f"  {result}")
-            print(f"\n{G}{BD}Done!{RS}")
-            await cdp.close()
-            return
-        else:
-            print(f"         {D}→ No article found with topic '{topic}', falling back to model{RS}")
-
-    messages = [{"role":"user","content":f"Task: {task}\n\nRULES:\n- Navigate to the site, then snapshot.\n- Find article links and click one.\n- After reaching an article page, call done immediately."}]
+    messages = [{"role":"user","content":f"Task: {task}"}]
     click_counts = {}  # Track how many times each UID is clicked
     last_snapshot = ""  # Track last snapshot to detect stuck state
 
@@ -405,27 +633,50 @@ async def run(task):
             if last_snapshot and r == last_snapshot:
                 r = r + "\n\n⚠️ WARNING: This snapshot is IDENTICAL to the previous one. The page has NOT changed. Try a different approach — scroll, press Escape, or navigate to a different URL."
             last_snapshot = r
-        elif tool=="click": r=await cdp.click(str(args.get("uid","")))
-        elif tool=="type_text": r=await cdp.type_into(str(args.get("uid","")),args.get("text",""))
+        elif tool=="click": r=await cdp.click(args.get("uid",""))
+        elif tool=="type_text": r=await cdp.type_into(args.get("uid",""),args.get("text",""))
         elif tool=="scroll": r=await cdp.scroll(args.get("direction","down"))
         elif tool=="comment": r=await cdp.post_comment(args.get("text",""))
         elif tool=="js": r=await cdp.js(args.get("code",""))
+        elif tool=="screenshot":
+            path = os.path.join(_DL_DIR, f"page_{int(time.time())}.png")
+            saved = await _cdp_screenshot(cdp, path)
+            r = _send_media_to_phone(saved, kind="image") if saved else "screenshot capture failed"
+        elif tool=="fullscreen_shot":
+            path = os.path.join(_DL_DIR, f"desktop_{int(time.time())}.png")
+            saved = _full_screenshot(path)
+            r = _send_media_to_phone(saved, kind="image") if saved else "screencapture failed"
+        elif tool=="send_image":
+            r = _send_media_to_phone(args.get("url",""), kind="image")
+        elif tool=="send_video":
+            r = _send_media_to_phone(args.get("url",""), kind="video")
+        elif tool=="record_start":
+            r = _studio_start(args.get("mode","screen"))
+        elif tool=="record_stop":
+            r = _studio_stop_and_send(send=True)
+        elif tool=="record_status":
+            r = _studio_status()
+        elif tool=="shell":
+            r = _tool_shell(args.get("cmd",""), int(args.get("timeout", 60) or 60))
+        elif tool=="read_file":
+            r = _tool_read_file(args.get("path",""))
+        elif tool=="write_file":
+            r = _tool_write_file(args.get("path",""), args.get("content",""))
         elif tool=="done":
-            # If this is a comment task, auto-comment before finishing
-            if is_comment:
-                # If no comment text provided, generate one from article content
-                if not comment_text:
-                    print(f"\n  {BD}Generating comment from article...{RS}")
-                    article_text = await cdp.js("document.querySelector('article, main, [role=main]')?.innerText?.substring(0,500) || document.title")
-                    comment_text = generate_comment(article_text)
-                    print(f"  {D}Generated: {comment_text[:80]}...{RS}")
-
-                print(f"\n  {BD}Auto-commenting on article...{RS}")
-                result = await cdp.post_comment(comment_text)
-                print(f"  {result}")
-            print(f"\n{G}{BD}Done:{RS} {args.get('message','')}")
+            done_msg = args.get('message','')
+            print(f"\n{G}{BD}Done:{RS} {done_msg}")
+            _text_phone(f"✅ {done_msg}")
             await cdp.close(); return
         else: r=f"Unknown: {tool}"
+
+        # Auto-attach a fresh page view after any action that changes the page,
+        # so the model never has to spend a separate (slow) turn calling snapshot.
+        if tool in ("navigate", "click", "type_text", "scroll"):
+            snap = await cdp.snapshot()
+            if last_snapshot and snap == last_snapshot:
+                snap += "\n\n⚠️ Page UNCHANGED since the last action — try a different element or approach."
+            last_snapshot = snap
+            r = f"{r}\n\nPAGE NOW (already snapshotted for you — do NOT call snapshot):\n{snap}"
 
         if len(r)>4000: r=r[:4000]+"...(truncated)"
         messages.append({"role":"assistant","content":json.dumps(tc)})
@@ -433,15 +684,8 @@ async def run(task):
         if len(messages)>10: messages=messages[:1]+messages[-8:]
         print(f"         {D}→ {r[:100].replace(chr(10),' ')}{RS}")
 
-    # If we hit max steps on a comment task, try commenting on whatever page we're on
-    if is_comment:
-        if not comment_text:
-            article_text = await cdp.js("document.title + '. ' + Array.from(document.querySelectorAll('p')).map(p=>p.innerText).filter(t=>t.length>40).slice(0,6).join(' ')")
-            comment_text = generate_comment(article_text)
-        print(f"\n  {BD}Auto-commenting on current page...{RS}")
-        result = await cdp.post_comment(comment_text)
-        print(f"  {result}")
-
+    print(f"\n{Y}Reached max steps ({MAX_STEPS}). Task may be incomplete.{RS}")
+    _text_phone("⚠️ Ran out of steps before finishing. Send a narrower ask?")
     await cdp.close()
 
 def main():
@@ -475,8 +719,10 @@ def main():
             asyncio.run(run(task))
         except KeyboardInterrupt:
             print(f"\n{Y}Task interrupted — back to prompt{RS}")
+            _text_phone("⏹️ Task interrupted. Ready for the next one.")
         except Exception as e:
             print(f"\n{R}Task failed: {type(e).__name__}: {e}{RS}")
             print(f"{D}Back to prompt — try again or type 'quit' to exit{RS}")
+            _text_phone(f"❌ Task failed: {type(e).__name__}. Send another?")
 
 if __name__=="__main__": main()
