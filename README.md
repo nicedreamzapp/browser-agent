@@ -61,7 +61,7 @@ This works because CDP operates at the **browser level**, not the page level. Sa
 
 ## Tools
 
-The model controls everything through one-JSON-tool-call-per-turn. After `navigate`/`click`/`type_text`/`scroll`, the fresh page state is attached to the result automatically, so it rarely needs a separate `snapshot`.
+The model controls everything through JSON tool calls — one per turn, **or a batch**: it can return a JSON array of up to 5 calls that execute back-to-back on a single model turn (fill three fields, click submit — one think instead of four). After `navigate`/`click`/`type_text`/`scroll`, the fresh page state is attached to the result automatically (once per batch, after the last action), so it rarely needs a separate `snapshot`.
 
 ### Web
 - `navigate(url)` — go to a page
@@ -157,7 +157,8 @@ Show me which of my LaunchAgents failed to load and tail the last 20 lines of ea
 ## How It Works
 
 ### Reliability
-- **Auto-attached page state** — the fresh DOM is returned with each action result, so the model doesn't waste turns re-snapshotting.
+- **Batched actions, guarded** — a batch executes in order, stops at the first error (skipping the rest so a broken plan can't keep firing), and reports every action's result numbered so the model knows exactly how far it got.
+- **Auto-attached page state** — the fresh DOM is returned with each action result (once per batch), so the model doesn't waste turns re-snapshotting.
 - **Loop detection** — if the same UID is clicked more than twice, the agent presses Escape (to dismiss any overlay) and forces a fresh snapshot so the model tries a different path.
 - **Error recovery** — any exception during a task (MLX timeout, CDP websocket drop, malformed output) is caught by the main loop; you get the error and a fresh prompt instead of a crash.
 
@@ -184,6 +185,8 @@ Two things are true at once: every individual browser action is near-instant, an
 | **Total for a comment task** | **~20–30 s** |
 
 **The honest takeaway from profiling:** the browser was never the bottleneck — the local model is. Typing, clicking, scrolling, and reading the page are all sub-second (typing is now effectively free). Total task time ≈ per-step model latency × number of steps, so the real speed levers are a faster local model or fewer steps per task — not faster browser plumbing.
+
+**That's exactly what batch mode attacks.** The model can return an array of up to 5 tool calls that execute in sequence on one turn. A fill-two-fields-and-submit sequence that used to cost three model thinks (~6–15 s) now costs one (~2–5 s). The safety rules keep it honest: element uids only exist for a page the model has already seen, so it's told never to batch a click/type against a page it hasn't loaded yet; an error mid-batch stops the remaining actions immediately and hands control back to the model with the numbered results; and the auto-snapshot runs once after the batch's last action instead of after every action.
 
 ### What got faster (and why)
 

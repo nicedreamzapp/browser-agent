@@ -279,6 +279,15 @@ TOOLS (media to user's phone — requires mobile mode on):
 - done(message) — Task complete. Use this for conversational replies too (e.g. if the user asks "why did you X", answer via done()).
 
 FORMAT: {"tool": "name", "args": {...}}
+BATCHING: You may instead return a JSON ARRAY of up to 5 tool calls, e.g.
+[{"tool":"type_text","args":{"uid":"12","text":"hi"}},{"tool":"click","args":{"uid":"15"}}]
+They run in sequence and you get every result back numbered, with the fresh page
+attached after the last one. Each reply from you costs seconds of thinking, so
+BATCH whenever the next steps are obvious — filling several fields then clicking
+submit is the classic case. ONE HARD RULE: uids only exist for the page you have
+already seen. NEVER batch a click/type_text that targets a page you haven't seen
+yet (e.g. don't navigate AND click in the same batch — navigate first, read the
+attached page, then batch the rest).
 RULES:
 - FOLLOW THE USER'S TASK EXACTLY. Do what they asked — nothing else.
 - PICK THE RIGHT TOOL FAMILY FIRST: if the task involves code/files/deploy/shell → use shell/read_file/write_file. Don't open a browser for things the terminal handles in one command.
@@ -600,6 +609,31 @@ def parse(text):
     return None
 
 
+def parse_multi(text):
+    """Extract one OR several tool calls. A JSON array of calls = a batch
+    (executed in order, one model turn). Falls back to the single-call parser."""
+    clean = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+    start = clean.find('[')
+    if start >= 0:
+        d = 0
+        for i in range(start, len(clean)):
+            if clean[i] == '[': d += 1
+            elif clean[i] == ']':
+                d -= 1
+                if d == 0:
+                    try:
+                        arr = json.loads(clean[start:i+1])
+                        if isinstance(arr, list):
+                            calls = [o for o in arr if isinstance(o, dict) and "tool" in o]
+                            if calls:
+                                return calls[:5]
+                    except Exception:
+                        pass
+                    break
+    tc = parse(text)
+    return [tc] if tc else []
+
+
 # ─── Agent ───────────────────────────────────────────────────────────────────
 
 async def run(task):
@@ -610,80 +644,103 @@ async def run(task):
     click_counts = {}  # Track how many times each UID is clicked
     last_snapshot = ""  # Track last snapshot to detect stuck state
 
-    for step in range(1, MAX_STEPS+1):
-        t0=time.time(); resp=ask_model(messages); elapsed=time.time()-t0
-        tc = parse(resp)
-        if not tc:
-            print(f"  {D}Step {step} (no tool) {elapsed:.1f}s{RS}")
-            messages.append({"role":"assistant","content":resp})
-            messages.append({"role":"user","content":'Respond with ONLY: {"tool":"name","args":{...}}'})
-            continue
-
-        tool=tc.get("tool",""); args=tc.get("args",{})
-
-        # ─── Loop Detection ─────────────────────────────────────────
-        if tool == "click":
-            uid = str(args.get("uid", ""))
-            click_counts[uid] = click_counts.get(uid, 0) + 1
-            if click_counts[uid] > 2:
-                print(f"  {Y}Step {step} LOOP DETECTED: uid {uid} clicked {click_counts[uid]} times — forcing Escape + snapshot{RS}")
-                # Auto-recover: press Escape (closes lightboxes/overlays), then force a snapshot
-                await cdp.js("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))")
-                await asyncio.sleep(0.5)
-                r = await cdp.snapshot()
-                messages.append({"role":"assistant","content":json.dumps({"tool":"js","args":{"code":"Escape"}})})
-                messages.append({"role":"user","content":f"Result: LOOP DETECTED — you clicked uid {uid} {click_counts[uid]} times. The page hasn't changed. I pressed Escape to close any overlay. Here is a fresh snapshot — try a DIFFERENT approach:\n\n{r[:3000]}"})
-                continue
-
-        args_s=', '.join(f'{k}={repr(v)[:40]}' for k,v in args.items())
-        print(f"  {D}Step {step}{RS} {B}{tool}{RS}({args_s}) {D}{elapsed:.1f}s{RS}")
-
-        if tool=="navigate": r=await cdp.navigate(args.get("url",""))
-        elif tool=="snapshot":
-            r=await cdp.snapshot()
-            # Detect stuck state: snapshot looks the same as last time
-            if last_snapshot and r == last_snapshot:
-                r = r + "\n\n⚠️ WARNING: This snapshot is IDENTICAL to the previous one. The page has NOT changed. Try a different approach — scroll, press Escape, or navigate to a different URL."
-            last_snapshot = r
-        elif tool=="click": r=await cdp.click(args.get("uid",""))
-        elif tool=="type_text": r=await cdp.type_into(args.get("uid",""),args.get("text",""))
-        elif tool=="scroll": r=await cdp.scroll(args.get("direction","down"))
-        elif tool=="comment": r=await cdp.post_comment(args.get("text",""))
-        elif tool=="js": r=await cdp.js(args.get("code",""))
-        elif tool=="screenshot":
+    async def exec_one(tool, args):
+        """Execute a single tool call. Returns a result string, or the tuple
+        ('__DONE__', message) when the model calls done()."""
+        if tool=="navigate": return await cdp.navigate(args.get("url",""))
+        if tool=="snapshot": return await cdp.snapshot()
+        if tool=="click": return await cdp.click(args.get("uid",""))
+        if tool=="type_text": return await cdp.type_into(args.get("uid",""),args.get("text",""))
+        if tool=="scroll": return await cdp.scroll(args.get("direction","down"))
+        if tool=="comment": return await cdp.post_comment(args.get("text",""))
+        if tool=="js": return await cdp.js(args.get("code",""))
+        if tool=="screenshot":
             path = os.path.join(_DL_DIR, f"page_{int(time.time())}.png")
             saved = await _cdp_screenshot(cdp, path)
-            r = _send_media_to_phone(saved, kind="image") if saved else "screenshot capture failed"
-        elif tool=="fullscreen_shot":
+            return _send_media_to_phone(saved, kind="image") if saved else "screenshot capture failed"
+        if tool=="fullscreen_shot":
             path = os.path.join(_DL_DIR, f"desktop_{int(time.time())}.png")
             saved = _full_screenshot(path)
-            r = _send_media_to_phone(saved, kind="image") if saved else "screencapture failed"
-        elif tool=="send_image":
-            r = _send_media_to_phone(args.get("url",""), kind="image")
-        elif tool=="send_video":
-            r = _send_media_to_phone(args.get("url",""), kind="video")
-        elif tool=="record_start":
-            r = _studio_start(args.get("mode","screen"))
-        elif tool=="record_stop":
-            r = _studio_stop_and_send(send=True)
-        elif tool=="record_status":
-            r = _studio_status()
-        elif tool=="shell":
-            r = _tool_shell(args.get("cmd",""), int(args.get("timeout", 60) or 60))
-        elif tool=="read_file":
-            r = _tool_read_file(args.get("path",""))
-        elif tool=="write_file":
-            r = _tool_write_file(args.get("path",""), args.get("content",""))
-        elif tool=="done":
-            done_msg = args.get('message','')
-            print(f"\n{G}{BD}Done:{RS} {done_msg}")
-            _text_phone(f"✅ {done_msg}")
-            await cdp.close(); return
-        else: r=f"Unknown: {tool}"
+            return _send_media_to_phone(saved, kind="image") if saved else "screencapture failed"
+        if tool=="send_image": return _send_media_to_phone(args.get("url",""), kind="image")
+        if tool=="send_video": return _send_media_to_phone(args.get("url",""), kind="video")
+        if tool=="record_start": return _studio_start(args.get("mode","screen"))
+        if tool=="record_stop": return _studio_stop_and_send(send=True)
+        if tool=="record_status": return _studio_status()
+        if tool=="shell": return _tool_shell(args.get("cmd",""), int(args.get("timeout", 60) or 60))
+        if tool=="read_file": return _tool_read_file(args.get("path",""))
+        if tool=="write_file": return _tool_write_file(args.get("path",""), args.get("content",""))
+        if tool=="done": return ("__DONE__", args.get("message",""))
+        return f"Unknown: {tool}"
+
+    for step in range(1, MAX_STEPS+1):
+        t0=time.time(); resp=ask_model(messages); elapsed=time.time()-t0
+        calls = parse_multi(resp)
+        if not calls:
+            print(f"  {D}Step {step} (no tool) {elapsed:.1f}s{RS}")
+            messages.append({"role":"assistant","content":resp})
+            messages.append({"role":"user","content":'Respond with ONLY: {"tool":"name","args":{...}} or a JSON array of such calls'})
+            continue
+
+        # ─── Execute the call(s) — a batch runs back-to-back on ONE model turn ──
+        results = []
+        page_changed = False
+        loop_hit = False
+        for ci, tc in enumerate(calls):
+            tool=tc.get("tool",""); args=tc.get("args",{}) or {}
+
+            # ─── Loop Detection ─────────────────────────────────────────
+            if tool == "click":
+                uid = str(args.get("uid", ""))
+                click_counts[uid] = click_counts.get(uid, 0) + 1
+                if click_counts[uid] > 2:
+                    print(f"  {Y}Step {step} LOOP DETECTED: uid {uid} clicked {click_counts[uid]} times — forcing Escape + snapshot{RS}")
+                    # Auto-recover: press Escape (closes lightboxes/overlays), then force a snapshot
+                    await cdp.js("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))")
+                    await asyncio.sleep(0.5)
+                    snap = await cdp.snapshot()
+                    messages.append({"role":"assistant","content":json.dumps(tc)})
+                    messages.append({"role":"user","content":f"Result: LOOP DETECTED — you clicked uid {uid} {click_counts[uid]} times. The page hasn't changed. I pressed Escape to close any overlay. Here is a fresh snapshot — try a DIFFERENT approach:\n\n{snap[:3000]}"})
+                    loop_hit = True
+                    break
+
+            tag = f"{ci+1}/{len(calls)} " if len(calls) > 1 else ""
+            args_s=', '.join(f'{k}={repr(v)[:40]}' for k,v in args.items())
+            print(f"  {D}Step {step}{RS} {tag}{B}{tool}{RS}({args_s}) {D}{elapsed:.1f}s{RS}")
+            elapsed = 0.0  # model time is only shown on the first action of a batch
+
+            r = await exec_one(tool, args)
+            if isinstance(r, tuple) and r[0] == "__DONE__":
+                done_msg = r[1]
+                print(f"\n{G}{BD}Done:{RS} {done_msg}")
+                _text_phone(f"✅ {done_msg}")
+                await cdp.close(); return
+
+            if tool == "snapshot":
+                # Detect stuck state: snapshot looks the same as last time
+                if last_snapshot and r == last_snapshot:
+                    r = r + "\n\n⚠️ WARNING: This snapshot is IDENTICAL to the previous one. The page has NOT changed. Try a different approach — scroll, press Escape, or navigate to a different URL."
+                last_snapshot = r
+
+            if tool in ("navigate", "click", "type_text", "scroll"):
+                page_changed = True
+            results.append(f"[{ci+1}] {tool}: {r}" if len(calls) > 1 else str(r))
+            print(f"         {D}→ {str(r)[:100].replace(chr(10),' ')}{RS}")
+
+            # An error mid-batch invalidates the model's plan — stop, report, let it re-think.
+            if isinstance(r, str) and r.startswith("Error") and ci + 1 < len(calls):
+                results.append(f"(batch stopped: action {ci+1} errored, skipped the remaining {len(calls)-ci-1})")
+                break
+
+        if loop_hit:
+            continue
+
+        r = "\n".join(results)
 
         # Auto-attach a fresh page view after any action that changes the page,
         # so the model never has to spend a separate (slow) turn calling snapshot.
-        if tool in ("navigate", "click", "type_text", "scroll"):
+        # For a batch this happens ONCE, after the last action — not per action.
+        if page_changed:
             snap = await cdp.snapshot()
             if last_snapshot and snap == last_snapshot:
                 snap += "\n\n⚠️ Page UNCHANGED since the last action — try a different element or approach."
@@ -691,10 +748,9 @@ async def run(task):
             r = f"{r}\n\nPAGE NOW (already snapshotted for you — do NOT call snapshot):\n{snap}"
 
         if len(r)>4000: r=r[:4000]+"...(truncated)"
-        messages.append({"role":"assistant","content":json.dumps(tc)})
+        messages.append({"role":"assistant","content":json.dumps(calls if len(calls)>1 else calls[0])})
         messages.append({"role":"user","content":f"Result: {r}"})
         if len(messages)>10: messages=messages[:1]+messages[-8:]
-        print(f"         {D}→ {r[:100].replace(chr(10),' ')}{RS}")
 
     print(f"\n{Y}Reached max steps ({MAX_STEPS}). Task may be incomplete.{RS}")
     _text_phone("⚠️ Ran out of steps before finishing. Send a narrower ask?")
