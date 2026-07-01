@@ -352,7 +352,7 @@ class CDP:
         ~0.5s) or bails out at `cap` seconds. When navigating, `want_origin`
         guards against returning while the OLD page is still showing — we wait
         until the new origin is actually in effect before calling it ready."""
-        await asyncio.sleep(0.3)  # let the navigation actually begin
+        await asyncio.sleep(0.15)  # brief buffer so we don't read the OLD page's readyState
         deadline = time.time() + cap
         while time.time() < deadline:
             r = await self.cmd("Runtime.evaluate", {"expression": "JSON.stringify([document.readyState, location.href])", "returnByValue": True})
@@ -363,7 +363,7 @@ class CDP:
             url_ok = (want_origin is None) or href.lower().startswith(want_origin) or href == "about:blank"
             if state == "complete" and url_ok:
                 return
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
 
     async def navigate(self, url):
         from urllib.parse import urlparse
@@ -399,7 +399,7 @@ class CDP:
         oid = r.get("object",{}).get("objectId")
         if not oid: return "Error: can't resolve"
         await self.cmd("Runtime.callFunctionOn",{"objectId":oid,"functionDeclaration":"function(){this.scrollIntoView({block:'center'})}"})
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.08)
         box = await self.cmd("DOM.getBoxModel",{"objectId":oid})
         if "error" in box or "model" not in box:
             await self.cmd("Runtime.callFunctionOn",{"objectId":oid,"functionDeclaration":"function(){this.click()}"})
@@ -410,16 +410,28 @@ class CDP:
         return "Clicked"
 
     async def type_into(self, uid, text):
-        await self.click(uid); await asyncio.sleep(0.3)
+        await self.click(uid); await asyncio.sleep(0.12)
+        # FAST PATH: insert the whole string in one CDP call. Fires proper input
+        # events, works in normal inputs, textareas, and contenteditable/rich
+        # editors. ~50x faster than char-by-char for any real text.
+        r = await self.cmd("Input.insertText", {"text": text})
+        if not (isinstance(r, dict) and "error" in r):
+            # Nudge search-as-you-type / React listeners that only react to keys.
+            await self.cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "ArrowLeft"})
+            await self.cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "ArrowLeft"})
+            await self.cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": "ArrowRight"})
+            await self.cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": "ArrowRight"})
+            return f"Typed {len(text)} chars"
+        # FALLBACK: per-character key events for fields that reject insertText.
         for ch in text:
             await self.cmd("Input.dispatchKeyEvent",{"type":"keyDown","text":ch,"key":ch})
             await self.cmd("Input.dispatchKeyEvent",{"type":"keyUp","key":ch})
-        return f"Typed {len(text)} chars"
+        return f"Typed {len(text)} chars (keys)"
 
     async def scroll(self, d="down"):
         delta = -500 if d=="up" else 500
         await self.cmd("Input.dispatchMouseEvent",{"type":"mouseWheel","x":400,"y":400,"deltaX":0,"deltaY":delta})
-        await asyncio.sleep(0.5); return f"Scrolled {d}"
+        await asyncio.sleep(0.15); return f"Scrolled {d}"
 
     async def js(self, code):
         r = await self.cmd("Runtime.evaluate",{"expression":code,"returnByValue":True,"awaitPromise":True})

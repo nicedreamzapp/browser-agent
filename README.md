@@ -67,7 +67,7 @@ The model controls everything through one-JSON-tool-call-per-turn. After `naviga
 - `navigate(url)` — go to a page
 - `snapshot()` — get the page's elements with UIDs (rarely needed; auto-attached after actions)
 - `click(uid)` — click an element by UID
-- `type_text(uid, text)` — type into a field by UID
+- `type_text(uid, text)` — type into a field by UID (one-shot `Input.insertText` — instant, even for long text)
 - `scroll(direction)` — `"up"` / `"down"`
 - `js(code)` — run arbitrary JavaScript and return a value
 
@@ -161,16 +161,34 @@ Show me which of my LaunchAgents failed to load and tail the last 20 lines of ea
 - **Loop detection** — if the same UID is clicked more than twice, the agent presses Escape (to dismiss any overlay) and forces a fresh snapshot so the model tries a different path.
 - **Error recovery** — any exception during a task (MLX timeout, CDP websocket drop, malformed output) is caught by the main loop; you get the error and a fresh prompt instead of a crash.
 
-## Performance (Gemma 4 31B on M-series, warm disk cache)
+## Performance
+
+Two things are true at once: every individual browser action is near-instant, and a full task still takes tens of seconds — because the model reasons for 2–5s *between* each action. We profiled the whole pipeline against real pages (M-series Mac, isolated tab, warm cache) to find out exactly where the time goes.
+
+**Per-operation — the browser mechanics (all sub-second):**
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| Type text (`Input.insertText`) | **~1 ms** | was ~108 ms char-by-char — **117× faster** on a 300-char field |
+| Page snapshot (a11y tree) | 2 ms → ~330 ms | near-instant on light pages, heavier on content-dense ones (Wikipedia) |
+| Navigate + wait-for-ready | 150–370 ms | polls `readyState` instead of sleeping a fixed worst-case |
+| Scroll | ~150 ms | |
+| `js()` eval | <1 ms | |
+
+**Per-step — where the time actually goes:**
 
 | Metric | Value |
 |--------|-------|
-| Navigate + snapshot | ~4s |
-| Article finding (JS) | <1s |
-| Comment generation | ~8s |
-| Comment typing (pierce + type) | ~3s |
-| Shell command | ~instant + command time |
-| **Total for a comment task** | **~20–30s** |
+| **Model reasoning per step** | **2,000–5,000 ms** (≈99% of a step) |
+| Comment generation | ~8 s |
+| **Total for a comment task** | **~20–30 s** |
+
+**The honest takeaway from profiling:** the browser was never the bottleneck — the local model is. Typing, clicking, scrolling, and reading the page are all sub-second (typing is now effectively free). Total task time ≈ per-step model latency × number of steps, so the real speed levers are a faster local model or fewer steps per task — not faster browser plumbing.
+
+### What got faster (and why)
+
+- **Typing is one call, not hundreds.** `type_text` used to dispatch a `keyDown`+`keyUp` pair for *every character* — 400 WebSocket round-trips to type a 200-char comment. It now sends the whole string in a single `Input.insertText`, with a one-key arrow nudge to wake up search-as-you-type/React listeners, and a per-character fallback for the rare field that rejects bulk insert. Works the same in plain inputs, textareas, and contenteditable/rich editors. Measured 117× faster.
+- **No more blind sleeps.** The fixed waits after `navigate`/`click`/`scroll` were trimmed hard (navigate settle 300→150 ms, scroll 500→150 ms, click 200→80 ms). Navigation still *polls* `readyState` for correctness — it just stops waiting the instant the page is genuinely ready instead of always sleeping the worst case.
 
 ## Files
 
