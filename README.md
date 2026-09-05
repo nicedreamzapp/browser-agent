@@ -16,6 +16,8 @@ An autonomous agent that runs entirely on Apple Silicon — it drives your real 
 
 > Started life as a pure browser agent. It has since grown a full system toolbelt (shell, files, screenshots, screen recording, send-to-phone), so it now handles end-to-end tasks like "find X on the web, run a script, and text me the result" in one session — all locally.
 
+> **Running more than one agent against the same browser?** Use [browser-broker](https://github.com/nicedreamzapp/browser-broker) — it leases each agent its own tab in an off-screen window that still renders, so agents never fight over tabs or touch the one you're reading.
+
 ## Architecture
 
 ```
