@@ -554,7 +554,29 @@ def ask_model(messages):
     body = json.dumps({"model":MODEL,"max_tokens":1024,"temperature":0.3,"system":SYSTEM,"messages":messages}).encode()
     req = urllib.request.Request(f"{MLX_URL}/v1/messages",data=body,headers={"Content-Type":"application/json"})
     with urllib.request.urlopen(req,timeout=120) as r: result=json.loads(r.read())
-    return "".join(b.get("text","") for b in result.get("content",[]) if b.get("type")=="text")
+    blocks = result.get("content", [])
+    text = "".join(b.get("text","") for b in blocks if b.get("type")=="text")
+
+    # Some models (Gemma 4) answer with their OWN native tool-call format
+    # instead of the JSON contract in SYSTEM. The MLX server recognizes that
+    # and hands it back as Anthropic `tool_use` blocks with EMPTY text — which
+    # this harness used to read as "no tool", so Gemma looked brain-dead for
+    # 12 straight steps (2026-08-11 bake-off). Fold those blocks back into the
+    # dialect the parser speaks. Costs nothing for models that reply in text.
+    calls = []
+    for b in blocks:
+        if b.get("type") != "tool_use":
+            continue
+        name = str(b.get("name") or "")
+        # names arrive namespaced sometimes ("browser:navigate", "mcp__x__click")
+        for sep in ("__", ":", "."):
+            if sep in name:
+                name = name.rsplit(sep, 1)[-1]
+        calls.append({"tool": name, "args": b.get("input") or {}})
+    if calls:
+        rendered = json.dumps(calls[0] if len(calls) == 1 else calls)
+        text = f"{text}\n{rendered}" if text.strip() else rendered
+    return text
 
 def generate_comment(article_text):
     """Generate a clean comment from article text. Handles Qwen's verbose reasoning."""
