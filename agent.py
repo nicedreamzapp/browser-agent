@@ -313,29 +313,83 @@ RULES:
 
 # ─── CDP ─────────────────────────────────────────────────────────────────────
 
+# ─── browser-broker lease (2026-09-16) ────────────────────────────────────────
+# Since 2026-09-05 port 9222 is browser-broker's proxy. A plain "GET /json, take the first page"
+# client gets a throwaway tab that is CLOSED when its socket drops, so every reconnect (and every
+# new task) started over on about:blank. One REST lease per process instead: the same tab for the
+# whole session, renewed in the background, released on exit. No broker -> old path, logged.
+BROKER_API = os.environ.get("BROKER_URL", "http://127.0.0.1:9223")
+_BROKER = {}
+
+def _broker_post(path, payload):
+    req = urllib.request.Request(BROKER_API + path, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read())
+
+def _broker_tab():
+    if _BROKER.get("ws_url"):
+        return _BROKER["ws_url"]
+    try:
+        g = _broker_post("/lease", {"owner": "browser-agent", "purpose": "browser agent session",
+                                    "hidden": os.environ.get("BROWSER_AGENT_VISIBLE") != "1",
+                                    "ttl": 600})
+    except Exception as e:
+        print(f"  (browser-broker not answering on {BROKER_API}: {e} — using the raw CDP path)")
+        return None
+    _BROKER.update(g)
+    import threading, atexit
+    stop = threading.Event()
+    def renew():
+        while not stop.wait(120):
+            try: _broker_post("/renew", {"lease_id": g["lease_id"], "ttl": 600})
+            except Exception: pass
+    threading.Thread(target=renew, daemon=True).start()
+    def release():
+        stop.set()
+        try: _broker_post("/release", {"lease_id": g["lease_id"]})
+        except Exception: pass
+    atexit.register(release)
+    # atexit does not run on SIGTERM, so a killed agent used to leave its tab
+    # open until the lease expired (10 min). Exit cleanly instead.
+    import signal
+    try:
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    except ValueError:
+        pass  # not the main thread
+    return g["ws_url"]
+
 class CDP:
     def __init__(self):
         self.ws = None; self.mid = 0
 
     async def connect(self):
-        with urllib.request.urlopen(f"{CDP_URL}/json", timeout=5) as r:
-            pages = json.loads(r.read())
-        ws_url = next((p["webSocketDebuggerUrl"] for p in pages if p.get("type")=="page" and "devtools" not in p.get("url","")), None)
-        if not ws_url: ws_url = pages[0]["webSocketDebuggerUrl"] if pages else None
+        ws_url = _broker_tab()
+        if not ws_url:
+            with urllib.request.urlopen(f"{CDP_URL}/json", timeout=5) as r:
+                pages = json.loads(r.read())
+            ws_url = next((p["webSocketDebuggerUrl"] for p in pages if p.get("type")=="page" and "devtools" not in p.get("url","")), None)
+            if not ws_url: ws_url = pages[0]["webSocketDebuggerUrl"] if pages else None
         if not ws_url: print(f"{R}No browser pages{RS}"); sys.exit(1)
+        self.ws_url = ws_url
         self.ws = await websockets.connect(ws_url, max_size=50*1024*1024)
         for m in ["DOM.enable","Accessibility.enable","Page.enable","Runtime.enable"]: await self.cmd(m)
 
     async def reconnect(self):
-        """Reconnect to the current active page after navigation."""
+        """Reconnect after a dropped socket. With a broker lease this goes back to the SAME tab;
+        the old 'first page' lookup landed on a fresh blank tab, because the proxy closes an
+        unleased tab the moment its socket drops (2026-09-16)."""
         try:
             if self.ws: await self.ws.close()
         except: pass
         await asyncio.sleep(1)
-        with urllib.request.urlopen(f"{CDP_URL}/json", timeout=5) as r:
-            pages = json.loads(r.read())
-        ws_url = next((p["webSocketDebuggerUrl"] for p in pages if p.get("type")=="page" and "devtools" not in p.get("url","")), None)
+        ws_url = _BROKER.get("ws_url")
+        if not ws_url:
+            with urllib.request.urlopen(f"{CDP_URL}/json", timeout=5) as r:
+                pages = json.loads(r.read())
+            ws_url = next((p["webSocketDebuggerUrl"] for p in pages if p.get("type")=="page" and "devtools" not in p.get("url","")), None)
         if ws_url:
+            self.ws_url = ws_url
             self.ws = await websockets.connect(ws_url, max_size=50*1024*1024)
             self.mid = 0
             for m in ["DOM.enable","Accessibility.enable","Page.enable","Runtime.enable"]: await self.cmd(m)
