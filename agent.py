@@ -333,7 +333,14 @@ RULES:
 #   3. Once any page has been read, the powerful tools (shell, files, phone media) only run when
 #      the user's own task asked for that kind of work. A command, URL, or file built from page text
 #      is refused, and so is anything that carries the user's task off the machine.
-_GUARD = {"page_text": "", "seen": False, "task": "", "blocked": 0}
+#   4. (Round 2, from the Claude-in-Chrome findings: hidden form fields, URL text, tab titles, an
+#      email telling the agent to delete mail "no confirmation required", data carried between
+#      sites.) Hidden buttons/links/fields are dropped too. High-risk clicks (delete, buy, pay,
+#      send, forward, post, publish, share, sign in...) and password/card fields only work when the
+#      task itself asks for that. Text read on one site cannot be typed or sent to another site
+#      unless the task names that site. Banking/payment sites need to be named in the task.
+_GUARD = {"page_text": "", "seen": False, "task": "", "blocked": 0,
+          "origin": "", "by_origin": {}, "names": {}}
 
 _SYSTEM_TASK_RE = re.compile(r"\b(shell|terminal|command|bash|zsh|script|git|ssh|scp|rsync|curl|wget|pip|npm|brew|"
                              r"python|deploy|build|install|compile|file|files|folder|directory|repo|server|wp-cli|"
@@ -345,10 +352,21 @@ _MEDIA_TOOLS = {"screenshot", "fullscreen_shot", "send_image", "send_video", "re
 _AI_ADDRESS_RE = re.compile(r"\b(ai|a\.i\.|assistants?|agents?|llms?|chatbots?|language models?|bots?|"
                             r"system (message|prompt|note|notice|instruction)s?|instructions? for)\b", re.I)
 _IMPERATIVE_RE = re.compile(r"\b(must|ignore|disregard|forget|do not|don't|before (you )?(answer|respond|continue)|"
-                            r"instead|run|execute|open|visit|go to|navigate|click|type|enter|paste|submit|report|"
+                            r"instead|run|execute|open|visit|go to|navigate|click|type|enter|paste|put|place|add|submit|report|"
                             r"say|tell|reply|respond|send|download|install)\b", re.I)
 _NET_JS_RE = re.compile(r"\b(fetch|XMLHttpRequest|sendBeacon|WebSocket|EventSource|window\.open|\.submit\s*\(|"
-                        r"location(\.href)?\s*=|location\.(assign|replace)|\.src\s*=|importScripts)\b")
+                        r"requestSubmit|\.click\s*\(|dispatchEvent|location(\.href)?\s*=|location\.(assign|replace)|"
+                        r"\.src\s*=|\.action\s*=|importScripts|document\.cookie|localStorage|sessionStorage)")
+_RISKY_CLICK_RE = re.compile(r"\b(delete|remove|trash|erase|discard|empty|buy|purchase|pay|payment|checkout|check out|"
+                             r"place order|order now|subscribe|unsubscribe|send|forward|post|publish|share|reply|"
+                             r"transfer|withdraw|donate|approve|authori[sz]e|sign in|log ?in|sign up|register|"
+                             r"archive|block|report|follow|install|download)\b", re.I)
+_SECRET_FIELD_RE = re.compile(r"\b(password|passcode|pin|card number|credit card|cvv|cvc|security code|ssn|"
+                              r"social security|routing|account number|api key|token|2fa|one-time code)\b", re.I)
+_SENSITIVE_HOSTS = ("paypal.", "venmo.", "stripe.", "authorize.net", "coinbase.", "kraken.", "binance.",
+                    "chase.", "bankofamerica.", "wellsfargo.", "capitalone.", "americanexpress.", "citi.",
+                    "usbank.", "schwab.", "fidelity.", "robinhood.", "cash.app", "zellepay.", "irs.gov",
+                    "accounts.google.", "myaccount.google.", "appleid.apple.", "icloud.com")
 
 _HIDDEN_TEXT_JS = r"""(() => {
   const out = [];
@@ -375,7 +393,19 @@ _HIDDEN_TEXT_JS = r"""(() => {
     }
     if (hid) out.push(t);
   }
-  return out;
+  const ctrl = [];
+  for (const el of document.querySelectorAll('input,textarea,select,button,a,[role=button],[role=link],[contenteditable=true]')) {
+    if (el.type === 'hidden') continue;
+    const cs = getComputedStyle(el), r = el.getBoundingClientRect();
+    let op = 1; for (let e = el; e; e = e.parentElement) op *= parseFloat(getComputedStyle(e).opacity || 1);
+    const hid = op < 0.15 || cs.visibility === 'hidden' || cs.display === 'none' || r.width < 4 || r.height < 4
+      || r.right < 0 || r.bottom < -window.scrollY || /rect\(0(px)?,? 0(px)?,? 0(px)?,? 0(px)?\)/.test(cs.clip);
+    if (!hid) continue;
+    const names = [el.getAttribute('aria-label'), el.placeholder, el.title, el.innerText, el.value, el.name,
+                   ...(el.labels ? [...el.labels].map(l => l.innerText) : [])];
+    for (const n of names) if (n && n.trim().length >= 2) ctrl.push(n.replace(/\s+/g, ' ').trim());
+  }
+  return {text: out, ctrl: ctrl, origin: location.origin};
 })()"""
 
 def _words(s):
@@ -394,6 +424,36 @@ def _from_page(text):
     page, task = _GUARD["page_text"].lower(), _GUARD["task"].lower()
     toks = re.findall(r"https?://[^\s'\"<>]+|[A-Za-z0-9_./:@-]{16,}", str(text))
     return [t for t in toks if t.lower() in page and t.lower() not in task]
+
+def _host(url):
+    from urllib.parse import urlparse
+    try: return (urlparse(url).hostname or "").lower()
+    except Exception: return ""
+
+def _origin_of(url):
+    from urllib.parse import urlparse
+    p = urlparse(url); return f"{p.scheme}://{p.netloc}".lower() if p.scheme and p.netloc else ""
+
+def _cross_site(text, here):
+    """Text read on another site (not the one at `here`, not named in the task) that `text` carries."""
+    task = _GUARD["task"].lower()
+    xw = " " + " ".join(_words(text)) + " "
+    toks = [t for t in re.findall(r"[A-Za-z0-9_@.+-]{8,}", str(text)) if re.search(r"\d", t) or "@" in t]
+    # short all-digit codes (OTP/PIN) count only when the source page framed them as a secret
+    _SECRET_CTX = re.compile(r"code|otp|one[- ]?time|password|passcode|\bpin\b|verify|verification|2fa|token|secret|confidential", re.I)
+    toks += re.findall(r"\b\d{5,8}\b", str(text))
+    for origin, ptext in _GUARD["by_origin"].items():
+        if origin == here or (_host(origin) and _host(origin) in task): continue
+        low = ptext.lower()
+        for t in toks:
+            if t.lower() in low and t.lower() not in task:
+                if re.fullmatch(r"\d{5,8}", t) and not _SECRET_CTX.search(ptext): continue
+                return f"{t[:40]} (read on {origin})"
+        pw = _words(ptext)
+        for i in range(len(pw) - 5):
+            run = " ".join(pw[i:i+6])
+            if " " + run + " " in xw and run not in " ".join(_words(task)): return f'"{run}" (read on {origin})'
+    return None
 
 def guard_check(tool, args):
     """Returns a BLOCKED message for a disallowed call, or None when the call may run."""
@@ -414,6 +474,27 @@ def guard_check(tool, args):
         target = args.get("url") or args.get("text") or ""
         if _carries_task(target):
             why = "that would send the user's own request to a web page"
+    if not why and tool == "navigate":
+        url, host = args.get("url", ""), _host(args.get("url", ""))
+        if host and any(h in host for h in _SENSITIVE_HOSTS) and host.split(".")[-2] not in task.lower():
+            why = f"{host} is a banking, payment or account site and the user's task did not name it"
+        elif _GUARD["seen"]:
+            leak = _cross_site(url, _origin_of(url))
+            if leak: why = f"that link carries data read on a different site: {leak}"
+    if not why and tool == "click" and _GUARD["seen"]:
+        name = _GUARD["names"].get(str(args.get("uid", "")).strip("[]"), "")
+        m = _RISKY_CLICK_RE.search(name)
+        if m and m.group(0).lower() not in task.lower():
+            why = (f'clicking "{name[:60]}" is a high-risk action ({m.group(0).lower()}) and the user\'s task '
+                   f'did not ask for it')
+    if not why and tool == "type_text" and _GUARD["seen"]:
+        name = _GUARD["names"].get(str(args.get("uid", "")).strip("[]"), "")
+        m = _SECRET_FIELD_RE.search(name)
+        if m and m.group(0).lower() not in task.lower():
+            why = f'"{name[:60]}" asks for a {m.group(0).lower()} and the user\'s task did not ask to enter one'
+        else:
+            leak = _cross_site(args.get("text", ""), _GUARD["origin"])
+            if leak: why = f"that text was read on a different site: {leak}"
     if tool == "shell" and not why and _carries_task(args.get("cmd", "")) and _GUARD["seen"]:
         why = "that command carries the user's request"
     if why:
@@ -558,7 +639,10 @@ class CDP:
         nodes = tree.get("nodes", [])
         lines = []
         hid = await self.cmd("Runtime.evaluate", {"expression": _HIDDEN_TEXT_JS, "returnByValue": True})
-        hidden = set(hid.get("result", {}).get("value") or [])
+        hv = hid.get("result", {}).get("value") or {}
+        hidden, hidden_ctrl = set(hv.get("text") or []), set(hv.get("ctrl") or [])
+        origin = hv.get("origin") or ""
+        _GUARD["origin"] = origin
         dropped = 0
         # Prioritize actionable elements: links, buttons, inputs, headings
         priority_roles = {"link","button","textbox","searchbox","heading","combobox","menuitem","checkbox","radio"}
@@ -572,16 +656,19 @@ class CDP:
             # an hour, or "30 days" in bold is its own short node, and dropping it left the model
             # blind to the real answer (2026-09-18: it read "365 days" from planted text instead).
             if role == "StaticText" and len(name) < 30 and not re.search(r"\d", name): continue
-            if " ".join(name.split()) in hidden:
+            flat = " ".join(name.split())
+            if flat in hidden or flat in hidden_ctrl:
                 dropped += 1; continue
             _GUARD["page_text"] = (_GUARD["page_text"] + "\n" + name)[-200000:]
+            _GUARD["by_origin"][origin] = (_GUARD["by_origin"].get(origin, "") + "\n" + name)[-100000:]
+            _GUARD["names"][str(nid)] = name
             name = _flag_injection(name)
             p = [f"[{nid}]", role, f'"{name[:160]}"']
             lines.append(" ".join(p))
             if len(lines) >= 200: break
         _GUARD["seen"] = True
         if dropped:
-            lines.append(f"({dropped} invisible text block(s) left out: a human visitor cannot see them)")
+            lines.append(f"({dropped} invisible item(s) left out: a human visitor cannot see them)")
         return "\n".join(lines) if lines else "(Empty page)"
 
     async def click(self, uid):
@@ -845,7 +932,7 @@ async def run(task):
     cdp = CDP(); await cdp.connect()
     print(f"{G}Connected to Brave{RS}\n")
 
-    _GUARD.update(page_text="", seen=False, task=task, blocked=0)
+    _GUARD.update(page_text="", seen=False, task=task, blocked=0, origin="", by_origin={}, names={})
     messages = [{"role":"user","content":f"Task: {task}"}]
     click_counts = {}  # Track how many times each UID is clicked
     last_snapshot = ""  # Track last snapshot to detect stuck state
