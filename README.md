@@ -28,7 +28,7 @@ User prompt → Local LLM (MLX) → ┬─ Chrome DevTools Protocol → Brave Br
 ```
 
 **Default model**: Gemma 4 31B Instruct abliterated (4-bit quantized) via MLX on Apple Silicon
-**Alternative models**: any MLX-compatible model — Qwen 3.5 122B (biggest), Llama 3.3 70B (smartest), or anything else — swap via the `MLX_MODEL` env var
+**Alternative models**: any MLX-compatible model, swap via the `MLX_MODEL` env var. In our Sep 16 four-tab test Gemma 4 31B and Qwen 3.8 27B both got 8/8; Gemma was about 30% faster
 **Browser**: Brave with remote debugging on port 9222
 **Protocol**: CDP WebSocket — no MCP, no proxy, direct connection
 
@@ -135,7 +135,7 @@ python agent.py "cd into my site repo, run the build, and text me a screenshot w
 
 ### Swap Models
 ```bash
-MLX_MODEL="mlx-community/Qwen2.5-72B-Instruct-4bit" python agent.py
+MLX_MODEL="lmstudio-community/Qwen3.8-27B-MLX-8bit" python agent.py
 ```
 
 ## Example Tasks
