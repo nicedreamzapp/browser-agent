@@ -208,6 +208,21 @@ Two things are true at once: every individual browser action is near-instant, an
 - Chrome DevTools Protocol — direct browser control via WebSocket
 - No cloud APIs, no subscriptions, no data leaving your machine
 
+## Other ways to do this
+
+Plenty of good people are working on agents that drive a browser. If this one doesn't fit, one of these might:
+
+- **[browser-use](https://github.com/browser-use/browser-use)** is a Python library for building browser agents on top of whichever model you like. The most complete option if you want to build your own agent.
+- **[chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp)**, from the Chrome DevTools team, gives coding agents like Claude Code direct control of Chrome over MCP, including performance traces.
+- **[Playwright MCP](https://github.com/microsoft/playwright-mcp)** does the same through Playwright and the page's accessibility tree, so the model works from structure instead of screenshots.
+- **[agent-browser](https://github.com/vercel-labs/agent-browser)** is a browser automation CLI built for AI agents to call.
+
+This one is small on purpose: one file, a local MLX model, and raw CDP, so nothing leaves your Mac.
+
+## Something not working?
+
+Open an [issue](https://github.com/nicedreamzapp/browser-agent/issues/new) with the task you gave it, the site, and the last lines of output. Whose work this is built on is in [CREDITS.md](CREDITS.md).
+
 ## 💬 Community
 
 Builders running this stack hang out in the NiceDreamzApps Discord — quiet, builder-tone, no bots. Share what you're scraping, what's breaking, what local model worked for which site.
