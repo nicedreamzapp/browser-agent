@@ -7,6 +7,7 @@
 **One logged-in browser · many agents · nobody fights, and nobody touches your tabs**
 **one Python proxy · it *is* port 9222, so no tool changes a single line**
 
+[![Tests](https://img.shields.io/github/actions/workflow/status/nicedreamzapp/browser-broker/ci.yml?branch=main&style=for-the-badge&label=tests)](https://github.com/nicedreamzapp/browser-broker/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-6366f1.svg?style=for-the-badge)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-22c55e.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Zero tool changes](https://img.shields.io/badge/tool_changes-zero-blue?style=for-the-badge)](#it-is-port-9222)
@@ -16,7 +17,7 @@
 
 **browser-broker is a local proxy that sits on Chrome's debug port (9222) and gives each AI agent its own private tab in your real, logged-in browser, so agents cannot see or steal each other's tabs or yours.**
 
-Proof in this repo: the Linux isolation check in [issue #1](https://github.com/nicedreamzapp/browser-broker/issues/1) (two clients, each blind to the other's tabs, checked in both directions), the stage timing run in [🎦 The stage](#the-stage), and the manual test runs listed under [📊 Status](#status). There is no automated test suite yet.
+Proof in this repo: the Linux isolation check in [issue #1](https://github.com/nicedreamzapp/browser-broker/issues/1) (two clients, each blind to the other's tabs, checked in both directions), the stage timing run in [🎦 The stage](#the-stage), the manual test runs listed under [📊 Status](#status), and the automated suite in [`tests/`](tests/), which CI runs on every push.
 
 ---
 
@@ -197,7 +198,14 @@ Localhost only, no auth. Anything that can reach `127.0.0.1:9223` can drive your
 
 ## <a name="status"></a>📊 Status
 
-Built in one night and proven with four manual tests: a leased tab loading Gmail authenticated while the human's visible tab sat on a different account; two agents running concurrently on separate targets; a simulated agent crash whose lease expired and was reclaimed; the human's tabs untouched throughout. Those runs are not checked in as a test suite; the repo has no automated tests yet.
+Built in one night and proven with four manual tests: a leased tab loading Gmail authenticated while the human's visible tab sat on a different account; two agents running concurrently on separate targets; a simulated agent crash whose lease expired and was reclaimed; the human's tabs untouched throughout. Those manual runs are not checked in.
+
+What is checked in is an automated suite in [`tests/`](tests/): 157 pytest tests that run the real `proxy.py`, `broker.py`, `broker_client.py`, `bb-show` and the hook example against a small fake Chrome DevTools endpoint ([`tests/fake_browser.py`](tests/fake_browser.py)) on loopback ports. It covers the ownership rules end to end (two clients blind to each other and to the human's tabs, focus stealers and `Browser.close` swallowed, tabs released on disconnect), the `/json` legacy path, the REST lease API, the stage queue, reaping and `tabs.json`. It needs no browser and no network, and runs on Linux in about 20 seconds. Two checks are macOS only (real `osascript`, `plutil`) and are skipped elsewhere. It does not drive a real Chrome, so the manual runs above still matter.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
 
 Not yet built: a lane router that skips the browser entirely when a job is really an API call, and per-domain serialization so two agents never hammer one site as the same user.
 

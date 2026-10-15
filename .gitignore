@@ -15,3 +15,4 @@ tabs.json.tmp
 broker.log.1
 site/
 .cache/
+.pytest_cache/

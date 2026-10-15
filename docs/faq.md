@@ -103,7 +103,12 @@ this page was written.)
 From the README: a lane router that skips the browser when a job is really an API
 call, and per-domain serialization so two agents never hit one site as the same
 user at once. From issue #1: a lease option that keeps a tab actually rendering.
-There is no automated test suite yet.
+
+### Is there a test suite?
+
+Yes. `pip install -r requirements-dev.txt` then `python -m pytest`. It runs the
+real proxy against a fake Chrome DevTools endpoint, so it needs no browser, and CI
+runs it on Python 3.9, 3.12 and 3.14.
 
 ### What is `broker.py`?
 

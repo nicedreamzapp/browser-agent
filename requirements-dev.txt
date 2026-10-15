@@ -1,0 +1,4 @@
+# Test dependencies. The runtime ones match what install.sh installs.
+websockets>=13
+websocket-client
+pytest>=7

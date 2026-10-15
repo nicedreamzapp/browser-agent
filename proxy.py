@@ -352,7 +352,14 @@ class Stage:
         wait = STAGE_WAIT if wait is None else int(wait)
         dwell = STAGE_DWELL if dwell is None else int(dwell)
         try:
-            await asyncio.wait_for(self._lock.acquire(), timeout=max(0, wait))
+            if wait <= 0:
+                # wait_for(..., 0) times out even on a free lock, because the
+                # acquire never gets to run. "Don't queue" checks the lock itself.
+                if self._lock.locked():
+                    raise asyncio.TimeoutError
+                await self._lock.acquire()
+            else:
+                await asyncio.wait_for(self._lock.acquire(), timeout=wait)
         except asyncio.TimeoutError:
             raise StageBusy(self.holder, round(max(0.0, self.until - time.time()), 1), self.url)
 
@@ -643,6 +650,8 @@ async def _browser_session(client):
             return False
         for _ in range(40):
             await asyncio.sleep(0.025)
+            if tid in seen:
+                return True     # ours, even if the client has already closed it
             if tid in REG.tabs:
                 return mine(tid)
         return False
@@ -869,12 +878,18 @@ class ApiHandler(BaseHTTPRequestHandler):
                                          "ws_url": f"ws://127.0.0.1:{LISTEN}/devtools/page/{tid}",
                                          "expires_in": ttl})
             if self.path.startswith("/renew"):
+                # Pool and browser-client tabs carry lease_id None: a body with no
+                # lease_id must not match them.
+                if not b.get("lease_id"):
+                    return self._reply(400, {"error": "lease_id is required"})
                 for tid, i in list(REG.tabs.items()):
                     if i.get("lease_id") == b.get("lease_id"):
                         i["expires"] = time.time() + int(b.get("ttl", DEFAULT_TTL))
                         return self._reply(200, {"lease_id": b["lease_id"], "expires_in": int(b.get("ttl", DEFAULT_TTL))})
                 return self._reply(404, {"error": "unknown lease"})
             if self.path.startswith("/release"):
+                if not b.get("lease_id"):
+                    return self._reply(400, {"error": "lease_id is required"})
                 for tid, i in list(REG.tabs.items()):
                     if i.get("lease_id") == b.get("lease_id"):
                         self._run(REG.close(tid, "released"))

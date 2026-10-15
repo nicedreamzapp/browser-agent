@@ -97,12 +97,14 @@ def lease(owner, url=None, purpose=None, hidden=True, ttl=TTL):
                     return
 
     threading.Thread(target=keepalive, daemon=True).start()
-    tab = Tab(g["ws_url"])
+    tab = None
     try:
+        tab = Tab(g["ws_url"])
         yield tab
     finally:
         stop.set()
-        tab.close()
+        if tab is not None:
+            tab.close()
         try:
             _post("/release", {"lease_id": g["lease_id"]})
         except Exception:

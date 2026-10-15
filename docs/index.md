@@ -84,7 +84,10 @@ raw websockets, browser-use …      ┘
 
 ## Status
 
-There is no automated test suite yet. What has been checked by hand is listed in
+An automated suite in `tests/` (157 pytest tests) runs `proxy.py` and the other
+components against a fake Chrome DevTools endpoint on every push; see the README's
+Status section for what it covers. It does not drive a real browser.
+What has been checked by hand is listed in
 the README and on the [Install](install.md#platform-support) page: macOS (where it
 was developed), Linux for the browser-level CDP path
 ([issue #1](https://github.com/nicedreamzapp/browser-broker/issues/1)), and
