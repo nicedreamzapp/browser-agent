@@ -13,3 +13,5 @@ brave-cdp-guard.log
 tabs.json
 tabs.json.tmp
 broker.log.1
+site/
+.cache/
