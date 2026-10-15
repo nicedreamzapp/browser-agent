@@ -43,7 +43,7 @@ User prompt → Local LLM (MLX) → ┬─ Chrome DevTools Protocol → Brave Br
 ```
 
 **Default model**: Gemma 4 31B Instruct abliterated (4-bit quantized) via MLX on Apple Silicon
-**Alternative models**: any MLX-compatible model, chosen when you start the MLX server (see [Swap Models](#swap-models)). In our Sep 16 four-tab test Gemma 4 31B and Qwen 3.8 27B both got 8/8; Gemma was about 30% faster
+**Alternative models**: any MLX-compatible model, chosen when you start the MLX server (see [Swap Models](#swap-models)). In our Sep 16 test (four jobs run one at a time, then the same four jobs in four tabs at once) Gemma 4 31B and Qwen 3.8 27B each got all 8 runs right, 4/4 in each mode; Gemma took 123 s one at a time and 110 s four at once, Qwen took 175 s and 176 s
 **Browser**: Brave with remote debugging on port 9222
 **Protocol**: CDP WebSocket — no MCP, no proxy, direct connection
 
