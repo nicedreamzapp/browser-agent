@@ -373,6 +373,33 @@ class Stage:
             self.free(mine)
             raise
 
+    async def _tab_showing(self, url):
+        """Target id of an open page tab already on this URL (fragment ignored), or None."""
+        want = url.split("#", 1)[0].rstrip("/")
+        try:
+            infos = (await self.up.send("Target.getTargets")).get("targetInfos", [])
+        except Exception:
+            return None
+        mine = set(self.tabs.values())
+        hits = [t for t in infos if t.get("type") == "page"
+                and t.get("url", "").split("#", 1)[0].rstrip("/") == want]
+        # Prefer a tab the stage already put up, then any other.
+        hits.sort(key=lambda t: t["targetId"] not in mine)
+        return hits[0]["targetId"] if hits else None
+
+    async def _navigate(self, tid, url):
+        """Reload tab `tid` in place at `url` (fresh copy, cache bypassed). True on success."""
+        try:
+            async with ws_connect(f"ws://127.0.0.1:{UPSTREAM}/devtools/page/{tid}", max_size=None) as ws:
+                await ws.send(json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": url}}))
+                await asyncio.wait_for(ws.recv(), 10)
+                await ws.send(json.dumps({"id": 2, "method": "Page.reload", "params": {"ignoreCache": True}}))
+                await asyncio.wait_for(ws.recv(), 10)
+            return True
+        except Exception as e:
+            log(f"stage: in-place refresh of {tid} failed ({e}), opening a new tab")
+            return False
+
     async def _show_locked(self, mine, owner, url, purpose, dwell):
         self.holder, self.url, self.purpose = owner, url, purpose
         self.until = time.time() + dwell
@@ -383,15 +410,26 @@ class Stage:
         # tab for everybody, so each agent's show closed the page another agent had
         # just put in front of Matt (page-audit and email-session ate each other's
         # tabs every few minutes). A tab the human opened is never ours either.
+        # Matt's rule, 2026-10-22: "refresh the page that is already open, never open
+        # new tabs of the same thing." If any tab already shows this page (same URL
+        # minus the #fragment, whoever opened it), reload that tab in place and close
+        # this owner's other stage tab, instead of stacking another copy.
+        same = await self._tab_showing(url)
         prev = self.tabs.pop(owner, None)
-        if prev:
+        if prev and prev != same:
             try:
                 await self.up.send("Target.closeTarget", targetId=prev)
             except Exception:
                 pass
 
-        res = await self.up.send("Target.createTarget", url=url, background=False)
-        self.tabs[owner] = res["targetId"]
+        if same and await self._navigate(same, url):
+            for o, t in list(self.tabs.items()):
+                if t == same:
+                    self.tabs.pop(o, None)
+            self.tabs[owner] = same
+        else:
+            res = await self.up.send("Target.createTarget", url=url, background=False)
+            self.tabs[owner] = res["targetId"]
         await self._front(self.tabs[owner])
         log(f"stage -> {owner}: {url} ({purpose or 'no purpose given'}), held {dwell}s")
         asyncio.create_task(self._decay(mine, dwell))
