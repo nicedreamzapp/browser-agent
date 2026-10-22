@@ -983,8 +983,36 @@ async def background():
         await asyncio.sleep(5)
 
 
+def _claim_ports():
+    """Take LISTEN and API before anything else happens.
+
+    2026-10-07: a second supervisor started a second proxy every 10 seconds.
+    Each one connected upstream, ran close_leftovers() — which closed every tab
+    the RUNNING proxy owned — and only then failed to bind and exited. Agents
+    lost their tabs mid-run every 10 seconds and the cause was invisible, because
+    the duplicate never lived long enough to be in the process list. A doomed
+    instance must now die before it can touch a single tab."""
+    import socket
+    held = []
+    for port in (LISTEN, API):
+        s = socket.socket()
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            for h in held:
+                h.close()
+            s.close()
+            log(f"another proxy already owns port {port} — exiting without "
+                f"touching any tabs")
+            sys.exit(0)
+        held.append(s)
+    for h in held:          # hand the ports back to the real servers below
+        h.close()
+
+
 async def main():
     global REG, UP, STAGE, INNER_PORT
+    _claim_ports()
     UP = Upstream()
     try:
         await UP.connect()
@@ -993,7 +1021,6 @@ async def main():
             f"--remote-debugging-port={UPSTREAM} first (see launch-browser.sh)")
         sys.exit(1)
     REG = Registry(UP)
-    await REG.close_leftovers()
     STAGE = Stage(UP)
     loop = asyncio.get_running_loop()
     ApiHandler.loop = loop
@@ -1006,6 +1033,10 @@ async def main():
         INNER_PORT = inner.sockets[0].getsockname()[1]
         front = await asyncio.start_server(front_door, "127.0.0.1", LISTEN, limit=1 << 20)
         async with front:
+            # Only once we genuinely own the ports is it safe to clean up after
+            # a previous run. Before the bind, "leftovers" may be another live
+            # proxy's working tabs.
+            await REG.close_leftovers()
             log(f"proxy up: CDP on {LISTEN} (upstream browser {UPSTREAM}), lease API on {API}")
             await asyncio.Future()
 
