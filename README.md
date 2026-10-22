@@ -15,29 +15,13 @@
 
 </div>
 
+<a id="why"></a>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s01-banner-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s01-banner-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s01-banner.svg" width="100%" alt="01. Why it exists. Two agents, one browser"></picture>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s01-r1-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s01-r1-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s01-r1.svg" width="100%" alt="One tab each. Each agent gets its own private tab in your real, logged-in browser. Zero tool changes. Your tools keep dialing port 9222 exactly as they do today. Tab ownership. Agents cannot see or steal each other&#x27;s tabs, or yours."></picture>
+
 **browser-broker is a local proxy that sits on Chrome's debug port (9222) and gives each AI agent its own private tab in your real, logged-in browser, so agents cannot see or steal each other's tabs or yours.**
 
 Proof in this repo: the Linux isolation check in [issue #1](https://github.com/nicedreamzapp/browser-broker/issues/1) (two clients, each blind to the other's tabs, checked in both directions), the stage timing run in [🎦 The stage](#the-stage), the manual test runs listed under [📊 Status](#status), and the automated suite in [`tests/`](tests/), which CI runs on every push.
-
----
-
-## 🛠️ What I built
-
-Designed and written by Matt Macosko:
-
-- [`proxy.py`](proxy.py): the transparent CDP proxy on :9222. Filters `Target.*` calls and events down to the caller's own tabs, swallows focus-stealing commands, ties tab ownership to the client connection, and serves the REST lease API and the stage on :9223. This is what the installer runs.
-- [`broker_client.py`](broker_client.py): the Python client. `lease()` context manager with auto-renew and release-on-exit, plus `show()` and `stage()`.
-- [`bb-show`](bb-show): the shell command agents use to ask for the screen instead of `open -a`.
-- [`hooks-example-focus-guard.py`](hooks-example-focus-guard.py): an example Claude Code `PreToolUse` hook that redirects `open -a <browser>` and AppleScript `activate` to `bb-show`.
-- [`broker.py`](broker.py): the first version, a standalone lease broker with `/adopt`. Kept for reference; the installer does not run it.
-- [`get.sh`](get.sh), [`install.sh`](install.sh), [`launch-browser.sh`](launch-browser.sh), [`launchd/com.browser-broker.plist`](launchd/com.browser-broker.plist): the macOS one-line installer, browser launcher and LaunchAgent.
-- [`windows/install.ps1`](windows/install.ps1), [`windows/launch-browser.ps1`](windows/launch-browser.ps1), [`windows/run-broker.ps1`](windows/run-broker.ps1): the Windows installer (Task Scheduler at-logon task), browser launcher and the supervisor that keeps `proxy.py` alive.
-
-Upstream, not mine: the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) and the Chrome/Brave browsers (Chromium team), and the [`websockets`](https://github.com/python-websockets/websockets) and [`websocket-client`](https://github.com/websocket-client/websocket-client) Python libraries. See [CREDITS.md](CREDITS.md).
-
----
-
-## 🛑 Two agents, one browser?
 
 If you just ran a second browser agent and watched it **navigate a tab out from under the first one** — or reach for "the active tab" and grab the page *you* were reading — that is what this fixes.
 
@@ -51,9 +35,12 @@ The Chrome DevTools Protocol has **no concept of ownership**. Every agent sees e
 
 browser-broker adds the missing layer: a process that owns the debug port and hands each agent an **exclusive lease** on its own tab.
 
----
+<img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s01-rule.svg" width="100%" alt="">
 
-## <a name="it-is-port-9222"></a>🔌 It *is* port 9222
+
+<a id="it-is-port-9222"></a>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s02-banner-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s02-banner-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s02-banner.svg" width="100%" alt="02. It is port 9222. A transparent proxy in front of your browser"></picture>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s02-r1-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s02-r1-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s02-r1.svg" width="100%" alt="Port 9222. The proxy takes it; your real browser moves to 9229 behind it. Focus blocked. Calls that would steal your screen are answered and never forwarded. Tabs you did not open do not exist. They are invisible to every agent."></picture>
 
 `proxy.py` takes 9222. Your real browser moves to 9229 behind it. Every tool keeps its existing command line and gets a browser in which **the only tabs that exist are the ones it was given**:
 
@@ -76,9 +63,12 @@ raw websockets, browser-use …      ┘
 
 Verified with Playwright's `connect_over_cdp`, a raw first-page websocket client, two concurrent browser-level clients, and the REST lease API — Gmail, LinkedIn and Yahoo Mail all loaded logged in, with the human's tabs untouched throughout.
 
----
+<img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s02-rule.svg" width="100%" alt="">
 
-## 🐍 Or use it directly
+
+<a id="direct"></a>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s03-banner-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s03-banner-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s03-banner.svg" width="100%" alt="03. Using it directly. The lease client and why it works"></picture>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s03-r1-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s03-r1-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s03-r1.svg" width="100%" alt="Auto-renew. The lease renews while you work and releases on exit. Dumb rule. Agents only get tabs the broker opened. Leases expire. 300 s by default, so no deadlocks."></picture>
 
 ```python
 from broker_client import lease
@@ -88,10 +78,6 @@ with lease("my-agent", url="https://mail.google.com", purpose="inbox sweep") as 
 ```
 
 The lease auto-renews while you work and releases on exit, including on an exception. A crashed agent frees its tab instead of stranding it.
-
----
-
-## 🧠 Why it works
 
 **Agent tabs are ordinary background tabs.** In your window, behind what you are looking at. No second window, nothing parked off-screen, nothing headless — headless can't use the profile that has your logins, and a stray window just shoves yours aside. Isolation was never the window's job: the ownership registry and the swallowed focus commands do all of it.
 
@@ -103,9 +89,12 @@ The lease auto-renews while you work and releases on exit, including on an excep
 
 **It has a heartbeat.** One log line an hour. A silent daemon is indistinguishable from a dead one.
 
----
+<img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s03-rule.svg" width="100%" alt="">
 
-## <a name="the-stage"></a>🎦 The stage: when an agent *does* want the screen
+
+<a id="the-stage"></a>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s04-banner-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s04-banner-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s04-banner.svg" width="100%" alt="04. The stage. When an agent does want the screen"></picture>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s04-r1-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s04-r1-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s04-r1.svg" width="100%" alt="bb-show. One agent holds the screen at a time; the next one waits its turn. Cooperative. Works because the polite path is one word shorter than the rude one."></picture>
 
 Everything above is about keeping agents out of your way. Sometimes one genuinely has something
 to show you, and that is the opposite problem.
@@ -146,9 +135,12 @@ shorter than the rude one. On a machine running Claude Code you can make it bind
 from the author's machine, so adjust them). If the broker is down, `bb-show` falls back to a plain
 `open -a`, which is macOS only.
 
----
+<img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s04-rule.svg" width="100%" alt="">
 
-## 📡 API
+
+<a id="install"></a>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s05-banner-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s05-banner-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s05-banner.svg" width="100%" alt="05. API and install. One-line install, REST lease API"></picture>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s05-r1-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s05-r1-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s05-r1.svg" width="100%" alt="One line. curl get.sh | bash installs it on macOS. REST on :9223. Lease, renew, release, status and health endpoints. Python 3.9+. macOS, Windows and Linux notes below."></picture>
 
 | | |
 |---|---|
@@ -163,9 +155,7 @@ from the author's machine, so adjust them). If the broker is down, `bb-show` fal
 
 Everything is configured by environment: `BROKER_PROXY_PORT` (9222, what tools dial), `BROKER_UPSTREAM_PORT` (9229, your real browser), `BROKER_PORT` (9223, lease API), `BROKER_TTL`, `BROKER_HEARTBEAT`, `BROKER_LOG`, and `BROKER_DEBUG=1` for a handshake trace.
 
----
-
-## 🚀 Install
+### 🚀 Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/get.sh | bash
@@ -188,15 +178,20 @@ Python 3.9+. `proxy.py` needs [`websockets`](https://github.com/python-websocket
 
 **Windows / Linux:** `proxy.py`, `broker.py` and `broker_client.py` are pure Python and don't care about the OS — only the two shell scripts are macOS (Windows has its own in `windows/`, below). Launch your browser with `--remote-debugging-port=9229 --remote-allow-origins=* --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling` (the same flags `launch-browser.sh` uses), then run `python proxy.py` from a startup task. `bb-show`'s fallback and the hook example are macOS only. Those backgrounding flags matter: agent tabs are background tabs, and without the flags Chrome throttles a background tab's timers to roughly once a second, which is enough to mount zero rows in a modern SPA. **What the flags do not do is make a hidden tab paint.** `requestAnimationFrame` does not fire in a document whose `visibilityState` is `hidden` — that is Page Visibility behaviour, not throttling, and no flag turns it back on. So a page that renders off timers or fetch callbacks fills in normally in an agent tab, and a page that renders inside a rAF loop (canvas, animation-driven charts) will sit at its initial frame. `Page.captureScreenshot` still returns a real PNG either way, so a screenshot is not proof the page is live. Developed on macOS. **Linux is verified for the browser-level CDP path** ([#1](https://github.com/nicedreamzapp/browser-broker/issues/1)): Ubuntu 26.04 / Chrome 153, two concurrent browser-level clients each saw only its own tabs, and cross-client `Target.attachToTarget` returned `No target with given id found` in both directions. Hidden-tab rendering was measured there too and reproduces on macOS: after 4s a hidden lease tab had fired 0 animation frames while its 100ms timer kept ticking, on both Ubuntu/Chrome 153 and macOS/Brave. Not yet covered there: a logged-in profile, Playwright `connectOverCDP`, the legacy `/json` first-page path, and multi-hour runs. **Windows is verified** (2026-10-02, Windows 11, Brave on Chromium 154, Python 3.14, logged-in real profile): `powershell -NoProfile -ExecutionPolicy Bypass -File windows\install.ps1` installs the two Python deps, registers a Task Scheduler task `browser-broker` (at logon, your user, interactive session, no time limit) and starts it. The task runs `windows\run-broker.ps1`, which runs `windows\launch-browser.ps1` once (exits if 9229 already answers, otherwise closes a CDP-less browser gracefully and relaunches it with the flags) and then keeps `proxy.py` alive under `pythonw` (no console window), restarting it 10s after any exit. Verified on that box: `/health` returned `{"ok": true, "brave": true}`, `/json/version` answered on 9222, a REST lease of a hidden tab evaluated `document.title` and closed on release, a legacy `/json` client and a raw browser-level client each saw only their own tab and never the human's, the stage opened a page in the human's window, and killing `proxy.py` brought it back on 9222/9223 within 10s. On Windows the stage relies on `Target.activateTarget` alone (the macOS app-activation step is skipped). Not covered yet: the close-and-relaunch path when the browser is already running without CDP, and a cold reboot. Logs: `launcher.log` and `broker.log` in the repo directory, `proxy.err` for Python tracebacks. If the browser is closed and reopened from its normal shortcut it comes back without CDP; run `windows\launch-browser.ps1` again (or sign out and back in).
 
----
+<img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s05-rule.svg" width="100%" alt="">
 
-## <a name="security"></a>🔒 Security
+
+<a id="status"></a>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s06-banner-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s06-banner-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s06-banner.svg" width="100%" alt="06. Security and status. What is tested, what is not"></picture>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s06-r1-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s06-r1-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s06-r1.svg" width="100%" alt="Localhost only. No auth. Do not expose 9222 or 9223. 157 pytest tests. Run on every push in CI, no browser or network needed."></picture>
+
+<a name="security"></a>
+### <a name="security"></a>🔒 Security
 
 Localhost only, no auth. Anything that can reach `127.0.0.1:9223` can drive your logged-in browser — which is already true of `127.0.0.1:9222` the moment you enable remote debugging. Don't expose either.
 
----
-
-## <a name="status"></a>📊 Status
+<a name="status"></a>
+### <a name="status"></a>📊 Status
 
 Built in one night and proven with four manual tests: a leased tab loading Gmail authenticated while the human's visible tab sat on a different account; two agents running concurrently on separate targets; a simulated agent crash whose lease expired and was reclaimed; the human's tabs untouched throughout. Those manual runs are not checked in.
 
@@ -209,9 +204,14 @@ python -m pytest
 
 Not yet built: a lane router that skips the browser entirely when a job is really an API call, and per-domain serialization so two agents never hammer one site as the same user.
 
----
+<img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s06-rule.svg" width="100%" alt="">
 
-## 🧩 The local-first stack
+
+<a id="around"></a>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s07-banner-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s07-banner-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s07-banner.svg" width="100%" alt="07. Around the project. The stack, prior art and license"></picture>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s07-r1-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s07-r1-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s07-r1.svg" width="100%" alt="Local-first stack. One piece of a set that runs entirely on your own machine. Prior art. Several neighbours attack the same problem from other directions."></picture>
+
+### 🧩 The local-first stack
 
 One piece of a set that runs entirely on your own machine, no cloud:
 
@@ -221,9 +221,7 @@ One piece of a set that runs entirely on your own machine, no cloud:
 | 🌐 [browser-agent](https://github.com/nicedreamzapp/browser-agent) | Hands | Drives your real browser via CDP — iframes, Shadow DOM, ProseMirror |
 | 🚦 **browser-broker** | Traffic cop | Leases each agent its own tab so hands never collide, or grab yours |
 
----
-
-## 🤝 Prior art and neighbours
+### 🤝 Prior art and neighbours
 
 This problem is being attacked from several directions right now. These aren't competitors so much as pieces of the same puzzle, and browser-broker borrows from the ideas in them:
 
@@ -235,8 +233,26 @@ This problem is being attacked from several directions right now. These aren't c
 
 What browser-broker adds is a layer that sits *below* all of them. It doesn't care which tool the agent is — a CLI, an MCP server, Playwright, raw websockets — because it hands out plain CDP page sockets. The ownership rule and the transparent 9222 endpoint are the parts that don't exist elsewhere yet. If you maintain one of the projects above and want a lease layer under yours, open an issue.
 
----
-
-## 📜 License
+### 📜 License
 
 MIT — see [LICENSE](LICENSE). Built on other people's work — see [CREDITS.md](CREDITS.md).
+
+<details>
+<summary><b>🛠️ What I built</b> (file by file)</summary>
+
+Designed and written by Matt Macosko:
+
+- [`proxy.py`](proxy.py): the transparent CDP proxy on :9222. Filters `Target.*` calls and events down to the caller's own tabs, swallows focus-stealing commands, ties tab ownership to the client connection, and serves the REST lease API and the stage on :9223. This is what the installer runs.
+- [`broker_client.py`](broker_client.py): the Python client. `lease()` context manager with auto-renew and release-on-exit, plus `show()` and `stage()`.
+- [`bb-show`](bb-show): the shell command agents use to ask for the screen instead of `open -a`.
+- [`hooks-example-focus-guard.py`](hooks-example-focus-guard.py): an example Claude Code `PreToolUse` hook that redirects `open -a <browser>` and AppleScript `activate` to `bb-show`.
+- [`broker.py`](broker.py): the first version, a standalone lease broker with `/adopt`. Kept for reference; the installer does not run it.
+- [`get.sh`](get.sh), [`install.sh`](install.sh), [`launch-browser.sh`](launch-browser.sh), [`launchd/com.browser-broker.plist`](launchd/com.browser-broker.plist): the macOS one-line installer, browser launcher and LaunchAgent.
+- [`windows/install.ps1`](windows/install.ps1), [`windows/launch-browser.ps1`](windows/launch-browser.ps1), [`windows/run-broker.ps1`](windows/run-broker.ps1): the Windows installer (Task Scheduler at-logon task), browser launcher and the supervisor that keeps `proxy.py` alive.
+
+Upstream, not mine: the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) and the Chrome/Brave browsers (Chromium team), and the [`websockets`](https://github.com/python-websockets/websockets) and [`websocket-client`](https://github.com/websocket-client/websocket-client) Python libraries. See [CREDITS.md](CREDITS.md).
+
+</details>
+
+<img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/assets/readme/s07-rule.svg" width="100%" alt="">
+
