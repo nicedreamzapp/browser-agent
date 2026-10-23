@@ -25,7 +25,10 @@ def test_shell_scripts_parse(script):
 @pytest.mark.parametrize("path", ["bb-show", "bb-close", "bb-peek", "get.sh", "install.sh", "launch-browser.sh",
                                   "brave-cdp-guard.sh"])
 def test_scripts_are_executable_in_git(path):
-    if not shutil.which("git") or not os.path.isdir(os.path.join(ROOT, ".git")):
+    # ROOT may be a subfolder of the checkout (broker/ inside browser-agent), so ask git
+    # instead of looking for ROOT/.git.
+    if not shutil.which("git") or subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=ROOT,
+                                                  capture_output=True, text=True).stdout.strip() != "true":
         pytest.skip("not a git checkout")
     out = subprocess.run(["git", "ls-files", "-s", path], cwd=ROOT, capture_output=True,
                          text=True).stdout

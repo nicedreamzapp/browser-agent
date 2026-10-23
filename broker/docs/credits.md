@@ -46,4 +46,4 @@ Other projects working on the same problem, listed in the README:
 - [captivus/chrome-agent](https://github.com/captivus/chrome-agent), [pasky/chrome-cdp-skill](https://github.com/pasky/chrome-cdp-skill), [ofershap/real-browser-mcp](https://github.com/ofershap/real-browser-mcp): drive your real, logged-in browser.
 
 If your work is here and you'd like the wording changed, or something is missing,
-[open an issue](https://github.com/nicedreamzapp/browser-broker/issues).
+[open an issue](https://github.com/nicedreamzapp/browser-agent/issues).

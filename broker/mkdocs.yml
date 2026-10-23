@@ -4,11 +4,10 @@ site_description: >-
   AI agent its own private tab in your real, logged-in Chrome or Brave, so agents
   never steal each other's tabs or yours.
 site_author: Matt Macosko
-# TODO-VERIFY: placeholder until GitHub Pages is enabled for this repo.
-site_url: https://nicedreamzapp.github.io/browser-broker/
-repo_url: https://github.com/nicedreamzapp/browser-broker
-repo_name: nicedreamzapp/browser-broker
-edit_uri: edit/main/docs/
+site_url: https://nicedreamzapp.github.io/browser-agent/
+repo_url: https://github.com/nicedreamzapp/browser-agent
+repo_name: nicedreamzapp/browser-agent
+edit_uri: edit/main/broker/docs/
 copyright: Copyright &copy; 2026 Nice Dreamz LLC. MIT License.
 
 theme:

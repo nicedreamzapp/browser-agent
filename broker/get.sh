@@ -1,13 +1,19 @@
 #!/bin/bash
 # browser-broker one-line installer.
-#   curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/get.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/broker/get.sh | bash
 #
-# Clones (or updates) the repo, relaunches your browser with CDP on a private
+# The broker lives in the broker/ folder of github.com/nicedreamzapp/browser-agent.
+# Clones (or updates) that repo, relaunches your browser with CDP on a private
 # port, and installs the proxy as a LaunchAgent that owns 9222.
 set -e
 
-DIR="${BROWSER_BROKER_DIR:-$HOME/.browser-broker}"
-REPO="https://github.com/nicedreamzapp/browser-broker"
+# An older install cloned the standalone browser-broker repo into ~/.browser-broker.
+# Keep using that checkout if it is there, so re-running this never makes a second copy.
+if [ -z "$BROWSER_BROKER_DIR" ] && [ -d "$HOME/.browser-broker/.git" ]; then
+  BROWSER_BROKER_DIR="$HOME/.browser-broker"
+fi
+DIR="${BROWSER_BROKER_DIR:-$HOME/.browser-agent}"
+REPO="https://github.com/nicedreamzapp/browser-agent"
 
 say(){ printf '\033[1;36m==>\033[0m %s\n' "$1"; }
 die(){ printf '\033[1;31mx\033[0m %s\n' "$1" >&2; exit 1; }
@@ -31,6 +37,9 @@ else
   git clone --quiet "$REPO" "$DIR"
 fi
 cd "$DIR"
+# browser-agent checkout: the broker is in broker/. An old standalone checkout has it at the top.
+[ -f broker/proxy.py ] && cd broker
+BROKER_DIR="$(pwd)"
 
 # Dependencies (websockets 13+ and websocket-client) are installed by install.sh,
 # into the same Python the LaunchAgent will run.
@@ -46,7 +55,7 @@ case "$(uname -s)" in
     say "non-macOS: start your browser yourself with"
     echo "   --remote-debugging-port=9229 --remote-allow-origins=* \\"
     echo "   --disable-backgrounding-occluded-windows --disable-renderer-backgrounding"
-    echo "   then: python3 $DIR/proxy.py"
+    echo "   then: python3 $BROKER_DIR/proxy.py"
     exit 0
     ;;
 esac

@@ -1,13 +1,13 @@
-name: docs
+name: broker docs
 
 on:
   push:
     branches: [main]
     paths:
-      - "docs/**"
-      - "mkdocs.yml"
-      - "requirements-docs.txt"
-      - ".github/workflows/docs.yml"
+      - "broker/docs/**"
+      - "broker/mkdocs.yml"
+      - "broker/requirements-docs.txt"
+      - ".github/workflows/broker-docs.yml"
   workflow_dispatch:
 
 permissions:
@@ -22,6 +22,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: broker
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -33,7 +36,7 @@ jobs:
       - run: mkdocs build --strict
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: broker/site
 
   deploy:
     needs: build

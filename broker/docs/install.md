@@ -20,7 +20,7 @@ description: >-
 ## macOS: one line
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/get.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/broker/get.sh | bash
 ```
 
 What `get.sh` does, in order:
@@ -29,8 +29,10 @@ What `get.sh` does, in order:
    prints the status and stops. It will not install a second broker on top of a
    working one.
 2. Checks that `git` and `python3` exist.
-3. Clones the repo into `$BROWSER_BROKER_DIR` (default `~/.browser-broker`), or
-   runs `git pull --ff-only` if it is already there.
+3. Clones [browser-agent](https://github.com/nicedreamzapp/browser-agent) (the broker is
+   its `broker/` folder) into `$BROWSER_BROKER_DIR` (default `~/.browser-agent`, or
+   `~/.browser-broker` if an older install is already there), or runs
+   `git pull --ff-only` if it is already there.
 4. On macOS: runs `./launch-browser.sh` (quits and relaunches your browser with
    CDP on 9229 and your last session restored), then `./install.sh`.
 5. On anything else: prints the browser flags and tells you to run `proxy.py`
@@ -50,7 +52,7 @@ Python's stderr goes to `launchd.err` in the repo directory.
 ## macOS: by hand
 
 ```bash
-git clone https://github.com/nicedreamzapp/browser-broker && cd browser-broker
+git clone https://github.com/nicedreamzapp/browser-agent && cd browser-agent/broker
 pip3 install websockets websocket-client
 ./launch-browser.sh   # your real profile, CDP on :9229
 ./install.sh          # LaunchAgent for proxy.py: :9222 for tools, :9223 lease API

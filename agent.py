@@ -601,7 +601,7 @@ HUMAN_QUIET = float(os.environ.get("BROWSER_AGENT_HUMAN_QUIET", "20"))   # his i
 HUMAN_WAIT = float(os.environ.get("BROWSER_AGENT_HUMAN_WAIT", "180"))    # pause at most this long, then ask
 AGENT_ECHO = 1.5          # trusted events this soon after our own CDP input are ours, not his
 
-# Same listener the broker injects (browser-broker/proxy.py HUMAN_JS): it records trusted
+# Same listener the broker injects (broker/proxy.py HUMAN_JS): it records trusted
 # input only (event.isTrusted, which no page script can fake) in window.__bbHuman, and
 # installs once per document even when both the agent and the broker inject it.
 HUMAN_JS = r"""(() => {

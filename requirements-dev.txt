@@ -1,0 +1,3 @@
+# Test dependencies for agent.py (the broker has its own in broker/requirements-dev.txt).
+websockets
+pytest>=7

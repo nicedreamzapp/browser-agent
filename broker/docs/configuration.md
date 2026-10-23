@@ -103,7 +103,7 @@ browser.
 
 | Script | Variable | Default | What it does |
 |---|---|---|---|
-| `get.sh` | `BROWSER_BROKER_DIR` | `~/.browser-broker` | Where the repo is cloned. |
+| `get.sh` | `BROWSER_BROKER_DIR` | `~/.browser-agent` (or an existing `~/.browser-broker`) | Where the repo is cloned. The broker runs from its `broker/` folder. |
 | `get.sh`, `install.sh` | `BROKER_PORT` | `9223` | Port used for the "already installed?" and post-install health checks. |
 | `install.sh` | `BROKER_PYTHON` | unset | Python to try first. |
 | `launch-browser.sh` | `BROKER_UPSTREAM_PORT` | `9229` | Port passed to `--remote-debugging-port`. |

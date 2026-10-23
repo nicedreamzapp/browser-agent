@@ -15,7 +15,7 @@ each AI agent its own private tab in your real, logged-in browser. Agents cannot
 see or take each other's tabs, and they cannot see yours.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/get.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/broker/get.sh | bash
 ```
 
 Your tools keep dialing port 9222 exactly as they do today. Nothing in them changes.
