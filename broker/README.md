@@ -7,7 +7,7 @@
 **One logged-in browser · many agents · nobody fights, and nobody touches your tabs**
 **one Python proxy · it *is* port 9222, so no tool changes a single line**
 
-[![Tests](https://img.shields.io/github/actions/workflow/status/nicedreamzapp/browser-broker/ci.yml?branch=main&style=for-the-badge&label=tests)](https://github.com/nicedreamzapp/browser-broker/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/github/actions/workflow/status/nicedreamzapp/browser-agent/broker-tests.yml?branch=main&style=for-the-badge&label=broker%20tests)](https://github.com/nicedreamzapp/browser-agent/actions/workflows/broker-tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-6366f1.svg?style=for-the-badge)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-22c55e.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Zero tool changes](https://img.shields.io/badge/tool_changes-zero-blue?style=for-the-badge)](#it-is-port-9222)
@@ -16,6 +16,8 @@
 </div>
 
 <a id="why"></a>
+
+> browser-broker now lives here, in the `broker/` folder of [browser-agent](https://github.com/nicedreamzapp/browser-agent). The agent does the work; the broker makes it safe to share your real, logged-in browser with it. Start at the [main README](../README.md); this page is the broker's full reference.
 <picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s01-banner-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s01-banner-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s01-banner.svg" width="100%" alt="01. Why it exists. Two agents, one browser"></picture>
 <picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s01-r1-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s01-r1-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s01-r1.svg" width="100%" alt="One tab each. Each agent gets its own private tab in your real, logged-in browser. Zero tool changes. Your tools keep dialing port 9222 exactly as they do today. Tab ownership. Agents cannot see or steal each other&#x27;s tabs, or yours."></picture>
 
@@ -28,7 +30,7 @@ If you just ran a second browser agent and watched it **navigate a tab out from 
 And if you have ever stepped in to help an agent, typed into the form or solved its captcha, and watched it reload the page and wipe your work: the broker now notices you and keeps every agent's hands off that tab. See [🤝 When the human helps](#when-the-human-helps).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/get.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/broker/get.sh | bash
 ```
 
 Nothing else changes. Your tools keep dialing port 9222 exactly as they do today.
@@ -246,13 +248,13 @@ Everything is configured by environment: `BROKER_PROXY_PORT` (9222, what tools d
 ### 🚀 Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/get.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/broker/get.sh | bash
 ```
 
 Or by hand:
 
 ```bash
-git clone https://github.com/nicedreamzapp/browser-broker && cd browser-broker
+git clone https://github.com/nicedreamzapp/browser-agent && cd browser-agent/broker
 pip3 install websockets websocket-client
 ./launch-browser.sh   # your real profile, CDP on :9229
 ./install.sh          # LaunchAgent for proxy.py: :9222 for tools, :9223 lease API
@@ -283,7 +285,7 @@ Localhost only, no auth. Anything that can reach `127.0.0.1:9223` can drive your
 
 Built in one night and proven with four manual tests: a leased tab loading Gmail authenticated while the human's visible tab sat on a different account; two agents running concurrently on separate targets; a simulated agent crash whose lease expired and was reclaimed; the human's tabs untouched throughout. Those manual runs are not checked in.
 
-What is checked in is an automated suite in [`tests/`](tests/): 167 pytest tests that run the real `proxy.py`, `broker.py`, `broker_client.py`, `bb-show` and the hook example against a small fake Chrome DevTools endpoint ([`tests/fake_browser.py`](tests/fake_browser.py)) on loopback ports. It covers the ownership rules end to end (two clients blind to each other and to the human's tabs, focus stealers and `Browser.close` swallowed, tabs released on disconnect), the `/json` legacy path, the REST lease API, the stage queue, reaping and `tabs.json`. It needs no browser and no network, and runs on Linux in about 20 seconds. Two checks are macOS only (real `osascript`, `plutil`) and are skipped elsewhere. It does not drive a real Chrome, so the manual runs above still matter.
+What is checked in is an automated suite in [`tests/`](tests/): 219 pytest tests that run the real `proxy.py`, `broker.py`, `broker_client.py`, `bb-show` and the hook example against a small fake Chrome DevTools endpoint ([`tests/fake_browser.py`](tests/fake_browser.py)) on loopback ports. It covers the ownership rules end to end (two clients blind to each other and to the human's tabs, focus stealers and `Browser.close` swallowed, tabs released on disconnect), the `/json` legacy path, the REST lease API, the stage queue, reaping and `tabs.json`. It needs no browser and no network, and runs on Linux in about 20 seconds. Two checks are macOS only (real `osascript`, `plutil`) and are skipped elsewhere. It does not drive a real Chrome, so the manual runs above still matter.
 
 ```bash
 pip install -r requirements-dev.txt
@@ -306,8 +308,8 @@ One piece of a set that runs entirely on your own machine, no cloud:
 | Project | Role | What it does |
 |---|---|---|
 | 🧠 [claude-code-local](https://github.com/nicedreamzapp/claude-code-local) | Brain | Claude Code on a local MLX model — the inference the agents think with |
-| 🌐 [browser-agent](https://github.com/nicedreamzapp/browser-agent) | Hands | Drives your real browser via CDP — iframes, Shadow DOM, ProseMirror |
-| 🚦 **browser-broker** | Traffic cop | Leases each agent its own tab so hands never collide, or grab yours |
+| 🌐 [browser-agent](../README.md) | Hands | Drives your real browser via CDP — iframes, Shadow DOM, ProseMirror |
+| 🚦 **browser-broker** (this folder) | Traffic cop | Leases each agent its own tab so hands never collide, or grab yours |
 
 ### 🤝 Prior art and neighbours
 

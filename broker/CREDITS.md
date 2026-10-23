@@ -6,7 +6,7 @@ None of this starts from scratch. Here's whose work this is built on.
 |---|---|---|
 | 🌐 [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) | Every tab the broker opens, parks, and reclaims | The Chromium team |
 | 🔌 [websocket-client](https://github.com/websocket-client/websocket-client) | The one dependency — the CDP socket | Hiroki Ohtani and contributors |
-| 🤖 [browser-agent](https://github.com/nicedreamzapp/browser-agent) | The agent this was built to keep out of the human's tabs | sibling project |
+| 🤖 [browser-agent](https://github.com/nicedreamzapp/browser-agent) | The agent this was built to keep out of the human's tabs | the repo this folder lives in |
 | 🧠 [claude-code-local](https://github.com/nicedreamzapp/claude-code-local) | The local MLX brain those agents think with | sibling project |
 
 ## Field reports
@@ -22,4 +22,4 @@ Testing on hardware I don't own, from people who had no reason to bother.
 If your work is here and you'd like the wording changed, or if something's
 missing, open an issue and I'll fix it.
 
-[← back to the README](README.md)
+[← back to the broker README](README.md) · [the main README](../README.md)
