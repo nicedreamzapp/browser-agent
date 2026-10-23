@@ -514,8 +514,14 @@ def _flag_injection(name):
 # ─── browser-broker lease (2026-09-16) ────────────────────────────────────────
 # Since 2026-09-05 port 9222 is browser-broker's proxy. A plain "GET /json, take the first page"
 # client gets a throwaway tab that is CLOSED when its socket drops, so every reconnect (and every
-# new task) started over on about:blank. One REST lease per process instead: the same tab for the
-# whole session, renewed in the background, released on exit. No broker -> old path, logged.
+# new task) started over on about:blank. One REST lease per TASK instead: the same tab for the
+# whole task (reconnects included), renewed in the background, and CLOSED when the task ends.
+# No broker -> old path, logged.
+#
+# Matt's rule (2026-10-23): "quit leaving tabs open after you do things." Every tab this agent
+# opens is closed the moment its task is done, on success, failure, Ctrl-C, SIGTERM/SIGHUP and
+# normal exit. The broker closes a lease's tab on release (and on TTL expiry as the backstop if
+# the process is SIGKILLed). Tabs the human opened are never touched.
 BROKER_API = os.environ.get("BROKER_URL", "http://127.0.0.1:9223")
 _BROKER = {}
 
@@ -536,27 +542,40 @@ def _broker_tab():
     except Exception as e:
         print(f"  (browser-broker not answering on {BROKER_API}: {e} — using the raw CDP path)")
         return None
-    _BROKER.update(g)
-    import threading, atexit
+    import threading
     stop = threading.Event()
+    _BROKER.update(g, stop=stop)
     def renew():
         while not stop.wait(120):
             try: _broker_post("/renew", {"lease_id": g["lease_id"], "ttl": 600})
             except Exception: pass
     threading.Thread(target=renew, daemon=True).start()
-    def release():
-        stop.set()
+    _install_exit_hooks()
+    return g["ws_url"]
+
+def _release_tab():
+    """Close this agent's leased tab now (the broker closes a tab on /release). Safe to call
+    twice; the next task leases a fresh tab."""
+    g = dict(_BROKER); _BROKER.clear()
+    if g.get("stop"): g["stop"].set()
+    if g.get("lease_id"):
         try: _broker_post("/release", {"lease_id": g["lease_id"]})
         except Exception: pass
-    atexit.register(release)
-    # atexit does not run on SIGTERM, so a killed agent used to leave its tab
+
+_HOOKS = []
+def _install_exit_hooks():
+    if _HOOKS: return
+    _HOOKS.append(1)
+    import atexit, signal
+    atexit.register(_release_tab)
+    # atexit does not run on SIGTERM/SIGHUP, so a killed agent used to leave its tab
     # open until the lease expired (10 min). Exit cleanly instead.
-    import signal
-    try:
-        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    except ValueError:
-        pass  # not the main thread
-    return g["ws_url"]
+    for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+        if sig is None: continue
+        try:
+            signal.signal(sig, lambda *_: sys.exit(0))
+        except ValueError:
+            pass  # not the main thread
 
 class CDP:
     def __init__(self):
@@ -817,6 +836,7 @@ class CDP:
 
     async def close(self):
         if self.ws: await self.ws.close()
+        self.ws = None
 
 
 # ─── MLX ─────────────────────────────────────────────────────────────────────
@@ -930,8 +950,19 @@ def parse_multi(text):
 # ─── Agent ───────────────────────────────────────────────────────────────────
 
 async def run(task):
-    cdp = CDP(); await cdp.connect()
-    print(f"{G}Connected to Brave{RS}\n")
+    """One task. Whatever happens inside (done, max steps, an exception, Ctrl-C), the tab it
+    opened is closed before this returns: close every tab you opened when the task is done."""
+    cdp = CDP()
+    try:
+        await cdp.connect()
+        print(f"{G}Connected to Brave{RS}\n")
+        return await _run(task, cdp)
+    finally:
+        try: await cdp.close()
+        except Exception: pass
+        _release_tab()
+
+async def _run(task, cdp):
 
     _GUARD.update(page_text="", seen=False, task=task, blocked=0, origin="", by_origin={}, names={})
     messages = [{"role":"user","content":f"Task: {task}"}]

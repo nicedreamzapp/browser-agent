@@ -28,12 +28,12 @@ An autonomous agent that runs entirely on Apple Silicon — it drives your real 
 
 Matt Macosko wrote the agent itself, all of it in [`agent.py`](agent.py):
 
-- **The agent loop**: model call, JSON tool-call parsing (single call or a batch of up to 5), step limit, loop detection ([`run`](agent.py#L931), [`parse_multi`](agent.py#L904))
-- **A raw CDP client** with no Playwright or Selenium: connect, reconnect to the same tab, accessibility-tree snapshots, click, one-call typing, scroll, JS ([`class CDP`](agent.py#L560))
-- **The iframe + Shadow DOM comment drafter** that pierces cross-origin widgets like OpenWeb ([`post_comment`](agent.py#L720))
+- **The agent loop**: model call, JSON tool-call parsing (single call or a batch of up to 5), step limit, loop detection ([`run`](agent.py#L952), [`parse_multi`](agent.py#L925))
+- **A raw CDP client** with no Playwright or Selenium: connect, reconnect to the same tab, accessibility-tree snapshots, click, one-call typing, scroll, JS ([`class CDP`](agent.py#L580))
+- **The iframe + Shadow DOM comment drafter** that pierces cross-origin widgets like OpenWeb ([`post_comment`](agent.py#L740))
 - **A prompt-injection guard** in code that the model cannot switch off ([`guard_check`](agent.py#L458), notes at [line 325](agent.py#L325))
 - **The system toolbelt**: shell, file read/write, screenshots, send-to-phone, Studio Record control ([lines 29 to 247](agent.py#L29))
-- **browser-broker tab leasing** so several agents can share one browser ([`_broker_tab`](agent.py#L528))
+- **browser-broker tab leasing** so several agents can share one browser ([`_broker_tab`](agent.py#L534))
 
 Upstream, not built here: [MLX](https://github.com/ml-explore/mlx) (Apple), the Gemma 4 model (Google DeepMind), the Chrome DevTools Protocol (Chromium), and the MLX server from the sibling [claude-code-local](https://github.com/nicedreamzapp/claude-code-local) repo. Full list in [CREDITS.md](CREDITS.md).
 
@@ -215,6 +215,13 @@ Show me which of my LaunchAgents failed to load and tail the last 20 lines of ea
 - **Auto-attached page state** — the fresh DOM is returned with each action result (once per batch), so the model doesn't waste turns re-snapshotting.
 - **Loop detection** — if the same UID is clicked more than twice, the agent presses Escape (to dismiss any overlay) and forces a fresh snapshot so the model tries a different path.
 - **Error recovery** — any exception during a task (MLX timeout, CDP websocket drop, malformed output) is caught by the main loop; you get the error and a fresh prompt instead of a crash.
+
+### Close what you open
+**The problem.** Agents kept leaving tabs open after they finished their jobs. The tabs piled up in Matt's browser across all three machines (the M5, the mini and the Windows PC), and he had to keep asking for them to be cleared. This agent used to hold its tab for the whole interactive session, so a finished task's page sat there until you quit.
+
+**What it does now.** Each task gets its own tab, and [`run`](agent.py#L952) closes it in a `finally` the moment the task ends: done, out of steps, failed, or interrupted. Reconnects inside a task go back to the same tab instead of opening another. On exit, `atexit` plus SIGTERM/SIGHUP handlers close anything still open, and if the process is killed outright the browser-broker lease expires and the broker closes the tab. Tabs you opened yourself are never touched.
+
+**The rule for any agent using this:** close every tab you opened when the task is done.
 
 ### Safety: web pages can't give orders
 Page text is treated as data. These checks live in code ([`guard_check`](agent.py#L458)), so a page can't talk the model out of them:
