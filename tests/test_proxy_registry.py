@@ -3,6 +3,8 @@ import json
 import os
 import time
 
+import pytest
+
 from conftest import http
 
 
@@ -128,3 +130,36 @@ def test_upstream_error_is_raised(stack):
     import pytest
     with pytest.raises(RuntimeError, match="nope"):
         stack.run(stack.proxy.UP.send("Target.getTargets"))
+
+
+def test_claim_ports_waits_for_an_old_proxy_to_let_go(monkeypatch):
+    """A restart must not lose the race against the process it replaces."""
+    import socket, threading, proxy
+    old = socket.socket()
+    old.bind(("127.0.0.1", 0))
+    old.listen()
+    port = old.getsockname()[1]
+    free = socket.socket()
+    free.bind(("127.0.0.1", 0))
+    other = free.getsockname()[1]
+    free.close()
+    monkeypatch.setattr(proxy, "LISTEN", port)
+    monkeypatch.setattr(proxy, "API", other)
+    monkeypatch.setattr(proxy, "PORT_GRACE", 5)
+    threading.Timer(1.0, old.close).start()
+    proxy._claim_ports()                      # returns once the old one has gone
+
+
+def test_claim_ports_still_refuses_a_real_duplicate(monkeypatch):
+    import socket, proxy
+    live = socket.socket()
+    live.bind(("127.0.0.1", 0))
+    live.listen()
+    monkeypatch.setattr(proxy, "LISTEN", live.getsockname()[1])
+    monkeypatch.setattr(proxy, "PORT_GRACE", 0.5)
+    try:
+        with pytest.raises(SystemExit) as e:
+            proxy._claim_ports()
+        assert e.value.code == 0
+    finally:
+        live.close()

@@ -84,6 +84,7 @@ HUMAN_QUIET = int(os.environ.get("BROKER_HUMAN_QUIET", 20))     # seconds his la
 AGENT_ECHO = 1.5                   # trusted events this soon after an agent's own CDP input are the agent's
 CHURN_WINDOW = int(os.environ.get("BROKER_CHURN_WINDOW", 600))  # seconds an open/close cycle is remembered
 CHURN_LIMIT = int(os.environ.get("BROKER_CHURN_LIMIT", 2))      # cycles allowed before "stop and ask"
+PORT_GRACE = 8                     # seconds a restarting proxy waits for the old one to let go
 
 
 def log(msg):
@@ -1580,21 +1581,32 @@ def _claim_ports():
     the duplicate never lived long enough to be in the process list. A doomed
     instance must now die before it can touch a single tab."""
     import socket
-    held = []
-    for port in (LISTEN, API):
-        s = socket.socket()
-        try:
-            s.bind(("127.0.0.1", port))
-        except OSError:
-            for h in held:
-                h.close()
-            s.close()
-            log(f"another proxy already owns port {port} — exiting without "
+    # 2026-10-23: `launchctl kickstart -k` started the new proxy while the old one
+    # was still letting go of its ports. The new one decided a live proxy owned
+    # them, exited 0, and launchd (restart only on failure) left the broker down.
+    # A restart gets a few seconds of grace; a genuine duplicate still exits
+    # without touching anything.
+    deadline = time.time() + PORT_GRACE
+    while True:
+        held, busy = [], None
+        for port in (LISTEN, API):
+            s = socket.socket()
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                s.close()
+                busy = port
+                break
+            held.append(s)
+        for h in held:          # hand the ports back to the real servers below
+            h.close()
+        if busy is None:
+            return
+        if time.time() >= deadline:
+            log(f"another proxy already owns port {busy} — exiting without "
                 f"touching any tabs")
             sys.exit(0)
-        held.append(s)
-    for h in held:          # hand the ports back to the real servers below
-        h.close()
+        time.sleep(0.5)
 
 
 async def main():
