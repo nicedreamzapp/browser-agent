@@ -22,18 +22,21 @@ An autonomous agent that runs entirely on Apple Silicon — it drives your real 
 
 > Started life as a pure browser agent. It has since grown a full system toolbelt (shell, files, screenshots, screen recording, send-to-phone), so it now handles end-to-end tasks like "find X on the web, run a script, and text me the result" in one session — all locally.
 
-> **Running more than one agent against the same browser?** Use [browser-broker](https://github.com/nicedreamzapp/browser-broker) — it leases each agent its own tab in an off-screen window that still renders, so agents never fight over tabs or touch the one you're reading.
+> **Running more than one agent against the same browser?** Use [browser-broker](https://github.com/nicedreamzapp/browser-broker) — it leases each agent its own background tab, so agents never fight over tabs or touch the one you're reading.
+
+> **Helping it along?** Type in its form or solve its captcha yourself: it notices, waits for you, and continues from what you did instead of starting over. See [Working with the human](#working-with-the-human-five-rules).
 
 ## What I built
 
 Matt Macosko wrote the agent itself, all of it in [`agent.py`](agent.py):
 
-- **The agent loop**: model call, JSON tool-call parsing (single call or a batch of up to 5), step limit, loop detection ([`run`](agent.py#L952), [`parse_multi`](agent.py#L925))
-- **A raw CDP client** with no Playwright or Selenium: connect, reconnect to the same tab, accessibility-tree snapshots, click, one-call typing, scroll, JS ([`class CDP`](agent.py#L580))
-- **The iframe + Shadow DOM comment drafter** that pierces cross-origin widgets like OpenWeb ([`post_comment`](agent.py#L740))
-- **A prompt-injection guard** in code that the model cannot switch off ([`guard_check`](agent.py#L458), notes at [line 325](agent.py#L325))
+- **The agent loop**: model call, JSON tool-call parsing (single call or a batch of up to 5), step limit, loop detection ([`run`](agent.py#L1123), [`parse_multi`](agent.py#L1096))
+- **A raw CDP client** with no Playwright or Selenium: connect, reconnect to the same tab, accessibility-tree snapshots, click, one-call typing, scroll, JS ([`class CDP`](agent.py#L718))
+- **The iframe + Shadow DOM comment drafter** that pierces cross-origin widgets like OpenWeb ([`post_comment`](agent.py#L911))
+- **A prompt-injection guard** in code that the model cannot switch off ([`guard_check`](agent.py#L465), notes at [line 332](agent.py#L332))
 - **The system toolbelt**: shell, file read/write, screenshots, send-to-phone, Studio Record control ([lines 29 to 247](agent.py#L29))
-- **browser-broker tab leasing** so several agents can share one browser ([`_broker_tab`](agent.py#L534))
+- **browser-broker tab leasing** so several agents can share one browser ([`_broker_tab`](agent.py#L541))
+- **Working with the human**: look before every step, notice and adopt what you typed or clicked, never reload or reopen mid-job, and stop and ask when stuck ([the five rules](agent.py#L587))
 
 Upstream, not built here: [MLX](https://github.com/ml-explore/mlx) (Apple), the Gemma 4 model (Google DeepMind), the Chrome DevTools Protocol (Chromium), and the MLX server from the sibling [claude-code-local](https://github.com/nicedreamzapp/claude-code-local) repo. Full list in [CREDITS.md](CREDITS.md).
 
@@ -213,18 +216,46 @@ Show me which of my LaunchAgents failed to load and tail the last 20 lines of ea
 ### Reliability
 - **Batched actions, guarded** — a batch executes in order, stops at the first error (skipping the rest so a broken plan can't keep firing), and reports every action's result numbered so the model knows exactly how far it got.
 - **Auto-attached page state** — the fresh DOM is returned with each action result (once per batch), so the model doesn't waste turns re-snapshotting.
-- **Loop detection** — if the same UID is clicked more than twice, the agent presses Escape (to dismiss any overlay) and forces a fresh snapshot so the model tries a different path.
+- **Loop detection** — if the same UID is clicked a third time, the agent stops and asks you one question instead of trying again (see the five rules below).
 - **Error recovery** — any exception during a task (MLX timeout, CDP websocket drop, malformed output) is caught by the main loop; you get the error and a fresh prompt instead of a crash.
 
 ### Close what you open
 **The problem.** Agents kept leaving tabs open after they finished their jobs. The tabs piled up in Matt's browser across all three machines (the M5, the mini and the Windows PC), and he had to keep asking for them to be cleared. This agent used to hold its tab for the whole interactive session, so a finished task's page sat there until you quit.
 
-**What it does now.** Each task gets its own tab, and [`run`](agent.py#L952) closes it in a `finally` the moment the task ends: done, out of steps, failed, or interrupted. Reconnects inside a task go back to the same tab instead of opening another. On exit, `atexit` plus SIGTERM/SIGHUP handlers close anything still open, and if the process is killed outright the browser-broker lease expires and the broker closes the tab. Tabs you opened yourself are never touched.
+**What it does now.** Each task gets its own tab, and [`run`](agent.py#L1123) closes it in a `finally` the moment the task ends: done, out of steps, failed, or interrupted. Reconnects inside a task go back to the same tab instead of opening another. On exit, `atexit` plus SIGTERM/SIGHUP handlers close anything still open, and if the process is killed outright the browser-broker lease expires and the broker closes the tab. Tabs you opened yourself are never touched.
 
 **The rule for any agent using this:** close every tab you opened when the task is done.
 
+### Working with the human: five rules
+**The problem.** On the night of October 22, 2026, agents fought the human over the same browser tab. An agent opened an opt-out form, started filling it in, closed the tab, opened it again and started over, more than ten times, right in front of him. When he stepped in to help, typing in the form or solving the captcha himself, the agent never noticed. It reloaded the page and wiped his work, or opened the same link on top of the page he had just submitted. The agent never looked at what the page showed right now, so it could not know what he had already done.
+
+**What it does now.** Five rules, each one in code ([the rules block](agent.py#L587)), working together with [browser-broker](https://github.com/nicedreamzapp/browser-broker), which enforces the same rules from its side:
+
+| Rule | How this agent keeps it |
+|---|---|
+| **1. One tab per job.** | One broker lease per task: the same tab for the whole job, reconnects included. When a task stops to ask you something, the tab is kept, and your answer continues the job in that same tab instead of starting a new one. |
+| **2. Look before every step.** | [`look()`](agent.py#L745) reads the tab (URL, title, every filled-in field, passwords masked) before each model turn and again right before each click or keystroke. |
+| **3. Notice when the human helps.** | A listener records real keyboard and mouse input (`event.isTrusted`; the agent's own input is recognized and not counted). While you are typing or clicking in its tab, the agent pauses. When you stop, it tells the model exactly what you changed ("Email now holds ...", "the page moved to /success") and continues from there. It never goes back to a page you already moved past. |
+| **4. No reloading or reopening mid-job.** | Navigating to the page it is already on is refused in code (that is a reload, and a reload wipes your work). The broker refuses reloads, closes and input in a tab you are working in, and the agent waits instead of treating that as an error. |
+| **5. Stuck means ask, not retry.** | One failure gets one clearly different try. A second failure in a row, clicking the same thing three times, reopening a page after a failure, or running out of steps stops the task with one short question (also texted to your phone in mobile mode). The model can call `ask(question)` itself. |
+
+What you see:
+
+```text
+  Step 3 click(uid='41')
+  The human is working in the tab: pausing until he stops.
+  The human helped: "Captcha" now holds "solved"; the human typed or clicked in this tab 3s ago
+  Step 4 click(uid='57')
+  ...
+NEED YOU: I'm stuck on https://people.example/optout: Error: can't resolve. What should I do?
+
+Your answer? use the second email
+```
+
+Every rule has its own tests in [`tests/test_five_rules.py`](tests/test_five_rules.py) (a fake tab and a scripted model, no browser needed; `python3 -m pytest tests`), and [`tests/live_hidden_tab_check.py`](tests/live_hidden_tab_check.py) checks the listener against a real browser in a hidden tab.
+
 ### Safety: web pages can't give orders
-Page text is treated as data. These checks live in code ([`guard_check`](agent.py#L458)), so a page can't talk the model out of them:
+Page text is treated as data. These checks live in code ([`guard_check`](agent.py#L465)), so a page can't talk the model out of them:
 - Text a human can't see (tiny, transparent, off-screen, same colour as the background) and hidden buttons or fields are dropped from the snapshot.
 - Visible text that addresses an AI and gives an order is labelled untrusted.
 - After a page has been read, shell, file and phone tools only run if your task asked for that kind of work, and commands or files built from page text are refused.
@@ -279,6 +310,7 @@ Two things are true at once: every individual browser action is near-instant, an
 ## Files
 
 - `agent.py` — the agent (single file)
+- `tests/` — the five-rules tests (`python3 -m pytest tests`) and a live hidden-tab check
 - `~/.local/mlx-native-server/server.py` — MLX inference server (ships with [claude-code-local](https://github.com/nicedreamzapp/claude-code-local))
 - `launchers/Browser Agent.command` — desktop launcher (ships with claude-code-local, surfaces as `Gemma 4 Browser.command`)
 
