@@ -8,6 +8,9 @@
 #
 #   bb-show <url> [owner] [purpose]
 #
+# When the task is done, close what you showed: bb-close <owner|url-substring>.
+# Rule: close every tab you opened the moment its task is done.
+#
 # Exit 0 shown · 2 screen busy (say so and move on, do NOT force it) · 1 error.
 set -u
 API="${BROKER_URL:-http://127.0.0.1:9223}"
@@ -24,7 +27,9 @@ CODE=$(printf '%s' "$OUT" | tail -1)
 JSON=$(printf '%s' "$OUT" | sed '$d')
 
 case "$CODE" in
-  200) echo "shown: $URL"; exit 0 ;;
+  200) echo "shown: $URL"
+       echo "when the task is done, close it: bb-close $OWNER   (rule: close every tab you opened)"
+       exit 0 ;;
   409) echo "screen busy — $JSON" >&2
        echo "not forcing it. tell the human the link instead: $URL" >&2; exit 2 ;;
   *)   # Broker down. Nothing should break just because the polite path is gone.

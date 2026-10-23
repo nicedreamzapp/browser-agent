@@ -138,6 +138,14 @@ def show(url, owner=None, purpose=None, wait=None, dwell=None):
         raise
 
 
+def unshow(match):
+    """Close the page(s) you put up with show(), by owner or URL substring.
+
+    Rule: close every tab you opened the moment its task is done. Only tabs the
+    broker opened are closed; the human's own tabs are left alone."""
+    return _post("/unshow", {"match": match})
+
+
 def stage():
     """Who has the screen right now, and what is on it."""
     with urlopen(BROKER + "/stage", timeout=10) as r:

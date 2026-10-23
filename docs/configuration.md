@@ -70,6 +70,20 @@ bb-show <url> [owner] [purpose]
 
 The request to `/show` has a 60 second `curl` timeout. Any status other than 200
 or 409 (including no answer at all) falls back to `open -a`, which only works on macOS.
+On success it prints a second line reminding the caller to run `bb-close` when done.
+
+## bb-close
+
+```
+bb-close <owner|url-substring>
+```
+
+**Close every tab you opened when the task is done.** `bb-close` posts `{"match": ...}` to `/unshow`, which
+closes every stage tab whose owner equals the argument or whose current URL contains it. Only
+tabs the stage itself opened are closed; a human tab that `bb-show` refreshed in place is left
+open and reported as `left open`. Exit `0` closed something, `3` nothing matched, `1` usage error
+or broker down (it never falls back to closing tabs on 9229 directly, since it cannot tell
+which of those are the human's). Uses `BROKER_URL` like `bb-show`.
 
 ## broker.py (legacy, not run by the installer)
 
@@ -124,6 +138,7 @@ All bodies are JSON. Paths are matched by prefix.
 | `POST /release` | `{lease_id}` | `{released}`, or `404` |
 | `POST /show` | `{owner, url, purpose, wait, dwell}` | `{shown, target_id, held_for, owner}`; `409 {error, held_by, seconds_left, showing}` if busy; `400` without `url` |
 | `POST /unstage` | none | `{freed: true/false}` |
+| `POST /unshow` | `match` (owner or URL substring) | `{closed: [...], left_open: [...]}` |
 | `POST /adopt` | any | Always `410` on the proxy |
 | `GET /status` | | `{tabs: [...], count, brave_alive, leases: [...]}` |
 | `GET /health` | | `{ok: true, brave: <browser answers>}` |

@@ -1,0 +1,35 @@
+#!/bin/bash
+# bb-close — close the page(s) you put up with bb-show, once the task is done.
+#
+# Matt's rule (2026-10-23): "quit leaving tabs open after you do things."
+# Every tab an agent opens is closed the moment its task is done, before it
+# reports back. bb-show opens; bb-close closes.
+#
+#   bb-close <owner|url-substring>
+#
+# Matches the owner name you gave bb-show, or any part of the page URL.
+# Only tabs the broker itself opened are closed; a tab the human already had
+# open (that bb-show merely refreshed in place) is left alone.
+#
+# Exit 0 closed something · 3 nothing matched · 1 error / broker down.
+set -u
+API="${BROKER_URL:-http://127.0.0.1:9223}"
+MATCH="${1:-}"
+[ -z "$MATCH" ] && { echo "usage: bb-close <owner|url-substring>" >&2; exit 1; }
+
+BODY=$(MATCH="$MATCH" python3 -c 'import json,os; print(json.dumps({"match":os.environ["MATCH"]}))')
+OUT=$(curl -sS -m 30 -w $'\n%{http_code}' -X POST "$API/unshow" \
+        -H "Content-Type: application/json" -d "$BODY" 2>/dev/null)
+CODE=$(printf '%s' "$OUT" | tail -1)
+JSON=$(printf '%s' "$OUT" | sed '$d')
+
+if [ "$CODE" != "200" ]; then
+  echo "broker not answering (code=${CODE:-none}) — nothing closed. $JSON" >&2
+  exit 1
+fi
+JSON="$JSON" python3 -c '
+import json,os,sys
+d=json.loads(os.environ["JSON"])
+for t in d.get("closed",[]): print("closed: %s (%s)" % (t.get("url") or t["target"], t["owner"]))
+for t in d.get("left_open",[]): print("left open: %s (%s): %s" % (t["target"], t["owner"], t["why"]))
+sys.exit(0 if d.get("closed") else 3)' || { rc=$?; [ $rc -eq 3 ] && echo "nothing to close for: $MATCH" >&2; exit $rc; }

@@ -129,3 +129,39 @@ def test_front_skips_app_activation_elsewhere(stack, monkeypatch):
 def test_front_real_osascript_on_macos(stack, monkeypatch):
     monkeypatch.setattr(stack.proxy, "BROWSER_APP", "Finder")
     stack.run(stack.proxy.STAGE._front("T1"))
+
+
+def unshow(stack, match):
+    return http("POST", stack.api_base + "/unshow", {"match": match})
+
+
+def test_unshow_closes_the_owners_stage_tab_and_frees_the_stage(stack):
+    code, r = show(stack, owner="a", url="https://a.example/report", dwell=60)
+    assert code == 200
+    code, u = unshow(stack, "a")
+    assert code == 200 and [t["owner"] for t in u["closed"]] == ["a"]
+    assert r["target_id"] not in stack.fake.targets
+    assert http("GET", stack.api_base + "/stage")[1]["held_by"] is None
+
+
+def test_unshow_matches_a_url_substring_and_spares_other_owners(stack):
+    _, ra = show(stack, owner="a", url="https://a.example/report", dwell=1)
+    http("POST", stack.api_base + "/unstage", {})
+    _, rb = show(stack, owner="b", url="https://b.example/other", dwell=1)
+    code, u = unshow(stack, "a.example/rep")
+    assert code == 200 and [t["owner"] for t in u["closed"]] == ["a"]
+    assert ra["target_id"] not in stack.fake.targets
+    assert rb["target_id"] in stack.fake.targets
+
+
+def test_unshow_never_closes_a_human_tab_it_only_refreshed(stack):
+    human = stack.fake.add_human_tab(url="https://shop.example/order/1")
+    code, r = show(stack, owner="a", url="https://shop.example/order/1", dwell=1)
+    assert code == 200 and r["target_id"] == human
+    code, u = unshow(stack, "a")
+    assert code == 200 and u["closed"] == [] and u["left_open"][0]["owner"] == "a"
+    assert human in stack.fake.targets
+
+
+def test_unshow_needs_a_match(stack):
+    assert http("POST", stack.api_base + "/unshow", {})[0] == 400

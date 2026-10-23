@@ -82,7 +82,9 @@ def test_shown(broker_url, fake_open):
     p = run(["https://x.example/a b?q=\"1\"", "agent-7", "show the report"],
             {"BROKER_URL": broker_url}, fake_open)
     assert p.returncode == 0, p.stderr
-    assert p.stdout.strip() == 'shown: https://x.example/a b?q="1"'
+    out = p.stdout.strip().splitlines()
+    assert out[0] == 'shown: https://x.example/a b?q="1"'
+    assert out[1].startswith("when the task is done, close it: bb-close agent-7")
     assert Broker.seen == [("/show", {"url": 'https://x.example/a b?q="1"', "owner": "agent-7",
                                       "purpose": "show the report"})]
     assert not fake_open[2].exists()
@@ -123,3 +125,40 @@ def test_unexpected_status_falls_back(broker_url, fake_open):
     p = run(["https://x"], {"BROKER_URL": broker_url}, fake_open)
     assert p.returncode == 0 and "code=500" in p.stderr
     assert fake_open[2].read_text().strip() == "-a Brave Browser https://x"
+
+
+BB_CLOSE = os.path.join(ROOT, "bb-close")
+
+
+def run_close(args, env_extra, fake_open):
+    bindir, pydir, _ = fake_open
+    env = {"PATH": f"{bindir}:{pydir}:/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")}
+    env.update(env_extra)
+    return subprocess.run(["bash", BB_CLOSE, *args], capture_output=True, text=True,
+                          env=env, timeout=30)
+
+
+def test_close_usage(fake_open):
+    p = run_close([], {}, fake_open)
+    assert p.returncode == 1 and "usage: bb-close" in p.stderr
+
+
+def test_close_posts_unshow(broker_url, fake_open):
+    Broker.reply = {"closed": [{"owner": "agent-7", "target": "abc", "url": "https://x/a"}],
+                    "left_open": []}
+    p = run_close(["agent-7"], {"BROKER_URL": broker_url}, fake_open)
+    assert p.returncode == 0, p.stderr
+    assert Broker.seen == [("/unshow", {"match": "agent-7"})]
+    assert "closed: https://x/a (agent-7)" in p.stdout
+
+
+def test_close_nothing_matched_exits_3(broker_url, fake_open):
+    Broker.reply = {"closed": [], "left_open": []}
+    p = run_close(["nope"], {"BROKER_URL": broker_url}, fake_open)
+    assert p.returncode == 3 and "nothing to close" in p.stderr
+
+
+def test_close_broker_down_never_opens_or_guesses(fake_open):
+    p = run_close(["x"], {"BROKER_URL": "http://127.0.0.1:9"}, fake_open)
+    assert p.returncode == 1 and "nothing closed" in p.stderr
+    assert not fake_open[2].exists()

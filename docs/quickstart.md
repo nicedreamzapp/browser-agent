@@ -94,6 +94,12 @@ bb-show https://example.com my-agent "the report you asked for"
 | `2` | Another agent has the screen. Print the link and move on; don't force it. |
 | `1` | Error (no URL given, or the fallback `open -a` failed). |
 
+**Close every tab you opened when the task is done.** Before reporting back, close what you showed:
+
+```bash
+bb-close my-agent
+```
+
 From Python:
 
 ```python

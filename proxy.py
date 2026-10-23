@@ -321,6 +321,7 @@ class Stage:
         self.purpose = None
         self.until = 0
         self.tabs = {}           # owner -> that owner's stage tab; nobody closes another's
+        self.created = set()     # stage tabs the broker itself opened; only these may be closed by /unshow
 
     def state(self):
         left = round(max(0.0, self.until - time.time()), 1)
@@ -417,6 +418,7 @@ class Stage:
         same = await self._tab_showing(url)
         prev = self.tabs.pop(owner, None)
         if prev and prev != same:
+            self.created.discard(prev)
             try:
                 await self.up.send("Target.closeTarget", targetId=prev)
             except Exception:
@@ -430,10 +432,45 @@ class Stage:
         else:
             res = await self.up.send("Target.createTarget", url=url, background=False)
             self.tabs[owner] = res["targetId"]
+            self.created.add(res["targetId"])
         await self._front(self.tabs[owner])
         log(f"stage -> {owner}: {url} ({purpose or 'no purpose given'}), held {dwell}s")
         asyncio.create_task(self._decay(mine, dwell))
         return {"shown": url, "target_id": self.tabs[owner], "held_for": dwell, "owner": owner}
+
+    async def unshow(self, match):
+        """Close the stage tab(s) whose owner is `match`, or whose page URL contains it.
+
+        Matt's rule, 2026-10-23: "quit leaving tabs open after you do things." An
+        agent that put a page up closes it when the task is done (bb-close). Only
+        tabs the stage itself opened are closed. A tab the human already had open
+        and the stage merely refreshed in place is forgotten, never closed.
+        """
+        if not match:
+            return {"closed": [], "left_open": []}
+        try:
+            urls = {t["targetId"]: t.get("url", "") for t in
+                    (await self.up.send("Target.getTargets")).get("targetInfos", [])}
+        except Exception:
+            urls = {}
+        closed, left = [], []
+        for o, tid in list(self.tabs.items()):
+            if o != match and match not in urls.get(tid, ""):
+                continue
+            self.tabs.pop(o, None)
+            if tid not in self.created:
+                left.append({"owner": o, "target": tid[:12], "why": "the human's own tab"})
+                continue
+            self.created.discard(tid)
+            try:
+                await self.up.send("Target.closeTarget", targetId=tid)
+            except Exception:
+                pass
+            closed.append({"owner": o, "target": tid[:12], "url": urls.get(tid, "")})
+            log(f"stage tab {tid[:12]} closed ({o}, unshow)")
+            if o == self.holder:
+                self.free(self._serial)
+        return {"closed": closed, "left_open": left}
 
     async def _decay(self, serial, dwell):
         await asyncio.sleep(dwell)
@@ -944,6 +981,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 except StageBusy as e:
                     return self._reply(409, {"error": str(e), "held_by": e.holder,
                                              "seconds_left": e.seconds_left, "showing": e.url})
+            if self.path.startswith("/unshow"):
+                match = b.get("match") or b.get("owner") or b.get("url")
+                if not match:
+                    return self._reply(400, {"error": "unshow needs an owner or a url substring (match)"})
+                return self._reply(200, self._run(STAGE.unshow(match)))
             if self.path.startswith("/unstage"):
                 return self._reply(200, {"freed": STAGE.free()})
             if self.path.startswith("/adopt"):

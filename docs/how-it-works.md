@@ -132,6 +132,11 @@ stayed clean.
    `osascript -e 'tell application "<BROWSER_APP>" to activate'`;
 4. returns at once and holds the lock for `dwell` seconds (default 20), then releases it.
 
+`POST /unshow` (or `bb-close`, or `broker_client.unshow()`) closes the stage tabs an
+owner put up, matched by owner or URL substring, and frees the stage if that owner holds it.
+**Close every tab you opened when the task is done.** Only tabs the stage opened are closed, never a human tab it
+merely refreshed.
+
 If showing fails, the lock is released immediately so later callers don't get stuck
 on `409`. `POST /unstage` releases it early. On Windows only `Target.activateTarget`
 is used.

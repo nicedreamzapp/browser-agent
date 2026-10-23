@@ -115,6 +115,33 @@ mid-sentence, and if the wait runs out it is told who has it and for how long, s
 the link and move on rather than fight. Re-showing a page closes the stale copy first, so there
 is never a row of half-current duplicates of the same page.
 
+### 🧹 Close what you open
+
+**The problem.** Agents kept leaving tabs open after they finished their jobs. Every invoice,
+report and lookup they put up stayed there, and the tabs piled up in Matt's browser across all
+three machines (the M5, the mini and the Windows PC) until he had to keep asking for them to be
+cleared. A page shown to the human with `bb-show` stayed open forever, because nothing in the
+tool ever closed it.
+
+**What the tool does now.** `bb-show` reminds the caller to close the page every time it shows
+one, and `bb-close` closes it. Hidden work tabs are closed outright when their lease is released,
+expires or its client disconnects. The rule for any agent using browser-broker:
+**close every tab you opened when the task is done.**
+
+A page you put up stays on the human's screen until
+something closes it, so close it yourself the moment the task is done, before you report back:
+
+```bash
+bb-close my-agent              # by the owner name you gave bb-show
+bb-close example.com/report    # or by any part of the page URL
+```
+
+`bb-show` prints this reminder every time it shows a page. `bb-close` only closes tabs the stage
+itself opened; if `bb-show` refreshed a tab the human already had open, that tab is left alone.
+Hidden work tabs close on their own: a lease's tab is closed (not just released) when the lease
+is released, when its TTL runs out, or when a browser-level client disconnects, and
+`broker_client.lease()` releases on exit, exceptions included.
+
 ```
 A: HTTP 200 after 0.7s   shown
 B: HTTP 409 after 0.0s   stage held by agent-A for another 7.0s
@@ -183,7 +210,7 @@ Python 3.9+. `proxy.py` needs [`websockets`](https://github.com/python-websocket
 
 <a id="status"></a>
 <picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s06-banner-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s06-banner-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s06-banner.svg" width="100%" alt="06. Security and status. What is tested, what is not"></picture>
-<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s06-r1-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s06-r1-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s06-r1.svg" width="100%" alt="Localhost only. No auth. Do not expose 9222 or 9223. 157 pytest tests. Run on every push in CI, no browser or network needed."></picture>
+<picture><source media="(max-width: 610px), (min-width: 768px) and (max-width: 895px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s06-r1-m.svg"><source media="(max-width: 1149px)" srcset="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s06-r1-mid.svg"><img src="https://raw.githubusercontent.com/nicedreamzapp/browser-broker/03e3d97ce3225fc44df9b6a14a50b40adeaffa66/assets/readme/s06-r1.svg" width="100%" alt="Localhost only. No auth. Do not expose 9222 or 9223. 167 pytest tests. Run on every push in CI, no browser or network needed."></picture>
 
 <a name="security"></a>
 ### <a name="security"></a>🔒 Security
@@ -195,7 +222,7 @@ Localhost only, no auth. Anything that can reach `127.0.0.1:9223` can drive your
 
 Built in one night and proven with four manual tests: a leased tab loading Gmail authenticated while the human's visible tab sat on a different account; two agents running concurrently on separate targets; a simulated agent crash whose lease expired and was reclaimed; the human's tabs untouched throughout. Those manual runs are not checked in.
 
-What is checked in is an automated suite in [`tests/`](tests/): 157 pytest tests that run the real `proxy.py`, `broker.py`, `broker_client.py`, `bb-show` and the hook example against a small fake Chrome DevTools endpoint ([`tests/fake_browser.py`](tests/fake_browser.py)) on loopback ports. It covers the ownership rules end to end (two clients blind to each other and to the human's tabs, focus stealers and `Browser.close` swallowed, tabs released on disconnect), the `/json` legacy path, the REST lease API, the stage queue, reaping and `tabs.json`. It needs no browser and no network, and runs on Linux in about 20 seconds. Two checks are macOS only (real `osascript`, `plutil`) and are skipped elsewhere. It does not drive a real Chrome, so the manual runs above still matter.
+What is checked in is an automated suite in [`tests/`](tests/): 167 pytest tests that run the real `proxy.py`, `broker.py`, `broker_client.py`, `bb-show` and the hook example against a small fake Chrome DevTools endpoint ([`tests/fake_browser.py`](tests/fake_browser.py)) on loopback ports. It covers the ownership rules end to end (two clients blind to each other and to the human's tabs, focus stealers and `Browser.close` swallowed, tabs released on disconnect), the `/json` legacy path, the REST lease API, the stage queue, reaping and `tabs.json`. It needs no browser and no network, and runs on Linux in about 20 seconds. Two checks are macOS only (real `osascript`, `plutil`) and are skipped elsewhere. It does not drive a real Chrome, so the manual runs above still matter.
 
 ```bash
 pip install -r requirements-dev.txt
@@ -243,8 +270,9 @@ MIT — see [LICENSE](LICENSE). Built on other people's work — see [CREDITS.md
 Designed and written by Matt Macosko:
 
 - [`proxy.py`](proxy.py): the transparent CDP proxy on :9222. Filters `Target.*` calls and events down to the caller's own tabs, swallows focus-stealing commands, ties tab ownership to the client connection, and serves the REST lease API and the stage on :9223. This is what the installer runs.
-- [`broker_client.py`](broker_client.py): the Python client. `lease()` context manager with auto-renew and release-on-exit, plus `show()` and `stage()`.
+- [`broker_client.py`](broker_client.py): the Python client. `lease()` context manager with auto-renew and release-on-exit, plus `show()`, `unshow()` and `stage()`.
 - [`bb-show`](bb-show): the shell command agents use to ask for the screen instead of `open -a`.
+- [`bb-close`](bb-close): closes what `bb-show` put up once the task is done (by owner or URL substring). Rule: close every tab you opened.
 - [`hooks-example-focus-guard.py`](hooks-example-focus-guard.py): an example Claude Code `PreToolUse` hook that redirects `open -a <browser>` and AppleScript `activate` to `bb-show`.
 - [`broker.py`](broker.py): the first version, a standalone lease broker with `/adopt`. Kept for reference; the installer does not run it.
 - [`get.sh`](get.sh), [`install.sh`](install.sh), [`launch-browser.sh`](launch-browser.sh), [`launchd/com.browser-broker.plist`](launchd/com.browser-broker.plist): the macOS one-line installer, browser launcher and LaunchAgent.

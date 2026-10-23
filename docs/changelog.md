@@ -11,6 +11,14 @@ description: >-
 The project has no tagged releases yet, so this list is grouped by commit date
 from the git history on `main`. Commit hashes link to GitHub.
 
+## 2026-10-23
+
+- **Close every tab you opened when the task is done.** New `bb-close <owner|url-substring>`
+  and `POST /unshow` close the pages an agent put up with `bb-show`; `bb-show` now prints a
+  reminder to run it. Only stage-opened tabs are closed, never a human tab that was refreshed
+  in place. Lease tabs were already closed (not just released) on release, TTL expiry and
+  client disconnect; that is now documented.
+
 ## 2026-10-06
 
 - **Proxy hardening** ([84248ea](https://github.com/nicedreamzapp/browser-broker/commit/84248ea)).
