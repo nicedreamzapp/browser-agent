@@ -132,9 +132,10 @@ def test_upstream_error_is_raised(stack):
         stack.run(stack.proxy.UP.send("Target.getTargets"))
 
 
-def test_claim_ports_waits_for_an_old_proxy_to_let_go(monkeypatch):
+def test_claim_ports_waits_for_an_old_proxy_to_let_go(monkeypatch, tmp_path):
     """A restart must not lose the race against the process it replaces."""
     import socket, threading, proxy
+    monkeypatch.setattr(proxy, "LOG", str(tmp_path / "broker.log"))
     old = socket.socket()
     old.bind(("127.0.0.1", 0))
     old.listen()
@@ -150,8 +151,9 @@ def test_claim_ports_waits_for_an_old_proxy_to_let_go(monkeypatch):
     proxy._claim_ports()                      # returns once the old one has gone
 
 
-def test_claim_ports_still_refuses_a_real_duplicate(monkeypatch):
+def test_claim_ports_still_refuses_a_real_duplicate(monkeypatch, tmp_path):
     import socket, proxy
+    monkeypatch.setattr(proxy, "LOG", str(tmp_path / "broker.log"))
     live = socket.socket()
     live.bind(("127.0.0.1", 0))
     live.listen()
@@ -163,3 +165,27 @@ def test_claim_ports_still_refuses_a_real_duplicate(monkeypatch):
         assert e.value.code == 0
     finally:
         live.close()
+
+
+def test_claim_ports_is_not_fooled_by_time_wait(monkeypatch, tmp_path):
+    """Connections the old proxy left in TIME_WAIT are not a live proxy."""
+    import socket, threading, proxy
+    monkeypatch.setattr(proxy, "LOG", str(tmp_path / "broker.log"))
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+    port = srv.getsockname()[1]
+    c = socket.create_connection(("127.0.0.1", port))
+    conn, _ = srv.accept()
+    conn.close()                  # the server side closes first: its end sits in TIME_WAIT
+    c.close()
+    srv.close()
+    free = socket.socket()
+    free.bind(("127.0.0.1", 0))
+    other = free.getsockname()[1]
+    free.close()
+    monkeypatch.setattr(proxy, "LISTEN", port)
+    monkeypatch.setattr(proxy, "API", other)
+    monkeypatch.setattr(proxy, "PORT_GRACE", 0)
+    proxy._claim_ports()          # must not exit

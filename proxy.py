@@ -1581,16 +1581,21 @@ def _claim_ports():
     the duplicate never lived long enough to be in the process list. A doomed
     instance must now die before it can touch a single tab."""
     import socket
-    # 2026-10-23: `launchctl kickstart -k` started the new proxy while the old one
-    # was still letting go of its ports. The new one decided a live proxy owned
-    # them, exited 0, and launchd (restart only on failure) left the broker down.
-    # A restart gets a few seconds of grace; a genuine duplicate still exits
-    # without touching anything.
+    # 2026-10-23: after `launchctl kickstart -k` the new proxy decided a live proxy
+    # owned its ports, exited 0, and launchd (restart only on failure) left the
+    # broker down. Two causes, both handled: TIME_WAIT leftovers (below) and an
+    # old process still letting go, which gets a few seconds of grace. A genuine
+    # duplicate still exits without touching anything.
     deadline = time.time() + PORT_GRACE
     while True:
         held, busy = [], None
         for port in (LISTEN, API):
             s = socket.socket()
+            # The real servers bind with SO_REUSEADDR, so the probe must too.
+            # Without it, the old process's connections still in TIME_WAIT
+            # look exactly like a live proxy for half a minute after a restart.
+            # An actual listener on the port still makes this bind fail.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind(("127.0.0.1", port))
             except OSError:
