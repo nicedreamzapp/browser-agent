@@ -590,3 +590,7 @@ Builders running this stack hang out in the NiceDreamzApps Discord: quiet, build
 ## License
 
 MIT. See [LICENSE](LICENSE) (the broker keeps its own copy in [broker/LICENSE](broker/LICENSE)).
+
+## Site recipes
+
+Real sites have quirks (LinkedIn's composer, opt-out forms, background tabs that ignore real input). The running list lives in [SITE-RECIPES.md](SITE-RECIPES.md). When an agent learns a new one, it gets added there right away.
