@@ -36,6 +36,12 @@ rule, so the next agent doesn't pay for the same lesson.
   `input[data-testid="fileInput"]`, and click `tweetButton`. Check the attachment `img`
   appears before you post.
 
+- **Reddit comments:** skip the composer. In a logged-in tab (a background tab is fine),
+  read `modhash` from `/api/me.json`, then POST `/api/comment` (`api_type=json`,
+  `thing_id=t3_<id>`, `text`) with the `X-Modhash` header. Confirm it worked by reading
+  `/user/<name>/comments.json`. Reddit's site-wide search ORs your words, so search per
+  subreddit (`/r/<sub>/search.json?restrict_sr=1`) with exact phrases.
+
 ## Privacy opt-out forms
 
 - **Same-vendor families:** TruePeopleSearch, CyberBackgroundChecks,
