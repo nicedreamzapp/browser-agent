@@ -25,6 +25,8 @@ Proof in this repo: the Linux isolation check in [issue #1](https://github.com/n
 
 If you just ran a second browser agent and watched it **navigate a tab out from under the first one** — or reach for "the active tab" and grab the page *you* were reading — that is what this fixes.
 
+And if you have ever stepped in to help an agent, typed into the form or solved its captcha, and watched it reload the page and wipe your work: the broker now notices you and keeps every agent's hands off that tab. See [🤝 When the human helps](#when-the-human-helps).
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-broker/main/get.sh | bash
 ```
@@ -112,8 +114,65 @@ bb-show https://example.com my-agent "why you are interrupting"
 
 One agent holds the screen at a time. A second one waits its turn instead of yanking the window
 mid-sentence, and if the wait runs out it is told who has it and for how long, so it can print
-the link and move on rather than fight. Re-showing a page closes the stale copy first, so there
-is never a row of half-current duplicates of the same page.
+the link and move on rather than fight. Showing a page that is already open brings that tab
+forward as it is, never a second copy and never a reload, so there is never a row of
+half-current duplicates of the same page.
+
+<a id="when-the-human-helps"></a>
+### 🤝 When the human helps: five rules
+
+**The problem.** On the night of October 22, 2026, agents fought the human over the same browser
+tab. An agent opened an opt-out form, started filling it in, closed the tab, opened it again and
+started over, more than ten times, right in front of him. When he stepped in to help, typing in
+the form or solving the captcha himself, the agent never noticed. It reloaded or re-showed the
+page and wiped his work, or opened the same link on top of the page he had just submitted. And it
+left the tabs open afterwards.
+
+We found four causes. The agent hopped between a hidden copy and a visible copy of the same
+page. Its fix for anything odd was to show the page again, and showing an already-open page
+reloaded it in place. Several agents acted in the browser at once, and one restarted the broker
+mid-task. And no agent ever read what the page showed right now, which is the only way to know
+what the human had already done.
+
+**The fix is five rules, and the broker enforces each one in code.** An agent does not have to
+remember them, and cannot talk its way around them.
+
+| Rule | What the broker does |
+|---|---|
+| **1. One tab per job.** | The owner name an agent passes is its job. A job owns one tab, pinned to one site, until `bb-close`. Showing the same site again returns that same tab. Leasing a hidden tab on a site the job already shows returns the shown tab, and showing a site the agent already has a hidden tab on brings that tab forward. There is never a second copy to hop to. |
+| **2. Look before every step.** | `bb-show` of an open page brings it forward as it is and prints what it shows: URL, title, text, filled-in fields, and whether the human is working in it. `bb-peek` reads the same state without showing anything (passwords and card numbers masked), for any tab, including the human's own. |
+| **3. Notice when the human helps.** | Every tab the broker opens or shows gets a small listener for real keyboard and mouse input (`event.isTrusted`, which page scripts cannot fake). Input the agent itself sends through the broker is recognized and not counted. While the human has been active in the last 20 seconds, agent clicks and keystrokes in that tab are refused, and a refused `bb-show` exits 4 and hands back what he has done so far, so the agent continues from there. |
+| **4. No reloading or closing mid-job.** | A page that is already open is never reloaded unless the caller passes `--reload`, and never while the human is working in it. A tab on screen for an open job cannot be reloaded, re-navigated to the same page or closed through the proxy. A tab the human is working in is never closed by anything: not `bb-close`, not a released or expired lease, not a disconnecting client, not a restarted broker. It is handed to him instead. |
+| **5. Stuck means ask, not retry.** | If the same job opens and closes (or reloads) the same page twice within 10 minutes, the third try is refused with HTTP 429 and `bb-show` exits 5 with one instruction: stop and ask the human in one line what is wrong. |
+
+What an agent sees:
+
+```text
+$ bb-show https://people.example/optout tps
+shown: https://people.example/optout
+already open: brought forward AS IS, NOT reloaded (no duplicate opened)
+  now at: https://people.example/optout/success
+  title:  Request received
+  shows:  Thank you. Your opt-out request has been submitted.
+  filled: Email = matt@example.com
+  the human worked in it (last input 41s ago)
+LOOK at that before acting: the human may already have filled, submitted or finished this page.
+
+$ bb-show --reload https://people.example/optout tps
+the human is working in that tab right now. Not reloaded, not reopened.     (exit 4)
+
+$ bb-show https://people.example/optout tps
+stop: "tps" has opened and closed https://people.example/optout 2 times in the last 10 minutes.
+It was not opened again. Do not retry. Ask the human in one line what is wrong.   (exit 5)
+```
+
+From Python, `broker_client.peek(owner)` returns the same state, `broker_client.human_active(owner)`
+answers yes or no, and `show()` raises `HumanIsWorking` (with `.page`) or `StopAndAsk`.
+`BROKER_HUMAN_QUIET` (20 s), `BROKER_CHURN_WINDOW` (600 s) and `BROKER_CHURN_LIMIT` (2) tune it.
+Every rule has its own tests in [`tests/test_five_rules.py`](tests/test_five_rules.py).
+
+One honest limit: a captcha inside a cross-site frame keeps its clicks to itself, so the broker
+counts the human's focus moving into that frame as activity rather than each click inside it.
 
 ### 🧹 Close what you open
 
@@ -136,8 +195,8 @@ bb-close my-agent              # by the owner name you gave bb-show
 bb-close example.com/report    # or by any part of the page URL
 ```
 
-`bb-show` prints this reminder every time it shows a page. `bb-close` only closes tabs the stage
-itself opened; if `bb-show` refreshed a tab the human already had open, that tab is left alone.
+`bb-show` prints this reminder every time it shows a page. `bb-close` only closes tabs the broker
+itself opened; a tab the human already had open, or is working in right now, is left to him.
 Hidden work tabs close on their own: a lease's tab is closed (not just released) when the lease
 is released, when its TTL runs out, or when a browser-level client disconnects, and
 `broker_client.lease()` releases on exit, exceptions included.
@@ -150,7 +209,9 @@ C: HTTP 200 after 7.9s   waited, then shown
 
 | | |
 |---|---|
-| `POST /show` | `{owner, url, purpose, wait, dwell}` → `{shown, target_id, held_for}`, or `409` with `held_by` and `seconds_left` |
+| `POST /show` | `{owner, url, purpose, wait, dwell, reload}` → `{shown, target_id, held_for, already_open, moved, reloaded, page}`; `409` screen busy, `423` the human is working in that tab (with `page`), `429` stop and ask |
+| `POST /unshow` | `{match}` (owner or URL part) → `{closed, left_open}`, what `bb-close` calls |
+| `GET /peek?match=` | read-only state of matching tabs: `url, title, text, fields, human`, what `bb-peek` calls |
 | `POST /unstage` | drop the hold early |
 | `GET /stage` | who has the screen and what is on it |
 
@@ -171,9 +232,9 @@ from the author's machine, so adjust them). If the broker is down, `bb-show` fal
 
 | | |
 |---|---|
-| `POST /lease` | `{owner, url, purpose, ttl}` → `{lease_id, target_id, ws_url, expires_in}` |
+| `POST /lease` | `{owner, url, purpose, ttl}` → `{lease_id, target_id, ws_url, expires_in, shared_with_shown_job}` |
 | `POST /renew` | `{lease_id, ttl}` |
-| `POST /release` | `{lease_id, close}` — closes the tab unless `close: false` |
+| `POST /release` | `{lease_id}` → `{released, tab_closed, left_open}`. Closes the tab, unless it is a job tab on screen (`bb-close` finishes that) or the human is working in it |
 | `POST /adopt` | returns `410` on the proxy. Only the older [`broker.py`](broker.py) supports it |
 | `GET /status` | who holds what, for how long, and whether the browser is alive |
 | `GET /health` | |

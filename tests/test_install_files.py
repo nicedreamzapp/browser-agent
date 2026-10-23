@@ -10,8 +10,8 @@ import sys
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SHELL_SCRIPTS = sorted(glob.glob(os.path.join(ROOT, "*.sh"))) + [os.path.join(ROOT, "bb-show"),
-                                                                  os.path.join(ROOT, "bb-close")]
+SHELL_SCRIPTS = sorted(glob.glob(os.path.join(ROOT, "*.sh"))) + [os.path.join(ROOT, n) for n in
+                                                                  ("bb-show", "bb-close", "bb-peek")]
 PLIST = os.path.join(ROOT, "launchd", "com.browser-broker.plist")
 
 
@@ -22,7 +22,7 @@ def test_shell_scripts_parse(script):
     assert p.returncode == 0, p.stderr
 
 
-@pytest.mark.parametrize("path", ["bb-show", "bb-close", "get.sh", "install.sh", "launch-browser.sh",
+@pytest.mark.parametrize("path", ["bb-show", "bb-close", "bb-peek", "get.sh", "install.sh", "launch-browser.sh",
                                   "brave-cdp-guard.sh"])
 def test_scripts_are_executable_in_git(path):
     if not shutil.which("git") or not os.path.isdir(os.path.join(ROOT, ".git")):

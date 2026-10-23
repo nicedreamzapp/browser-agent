@@ -28,9 +28,14 @@ class Broker(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def do_POST(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        Broker.seen.append((self.path, json.loads(self.rfile.read(n))))
+    def do_GET(self):
+        Broker.seen.append((self.path, None))
+        self.do_POST(read=False)
+
+    def do_POST(self, read=True):
+        if read:
+            n = int(self.headers.get("Content-Length") or 0)
+            Broker.seen.append((self.path, json.loads(self.rfile.read(n))))
         raw = json.dumps(Broker.reply).encode()
         self.send_response(Broker.code)
         self.send_header("Content-Type", "application/json")
@@ -162,3 +167,86 @@ def test_close_broker_down_never_opens_or_guesses(fake_open):
     p = run_close(["x"], {"BROKER_URL": "http://127.0.0.1:9"}, fake_open)
     assert p.returncode == 1 and "nothing closed" in p.stderr
     assert not fake_open[2].exists()
+
+
+# ---- the five rules, as the shell tools see them (2026-10-23) ------------------
+PAGE = {"url": "https://p.example/optout/success", "title": "Done", "text": "Request received.",
+        "fields": [{"field": "Email", "value": "m@example.com"}],
+        "human": {"active": True, "last_input_seconds_ago": 3.0, "inputs": 4}}
+
+
+def test_already_open_prints_what_the_page_shows_now(broker_url, fake_open):
+    Broker.reply = {"already_open": True, "reloaded": False, "moved": False, "page": PAGE}
+    p = run(["https://p.example/optout", "tps"], {"BROKER_URL": broker_url}, fake_open)
+    assert p.returncode == 0, p.stderr
+    assert "brought forward AS IS, NOT reloaded" in p.stdout
+    assert "now at: https://p.example/optout/success" in p.stdout
+    assert "filled: Email = m@example.com" in p.stdout
+    assert "HUMAN IS WORKING IN IT" in p.stdout and "LOOK at that before acting" in p.stdout
+
+
+def test_reload_flag_is_sent_only_when_asked(broker_url, fake_open):
+    run(["--reload", "https://x", "o"], {"BROKER_URL": broker_url}, fake_open)
+    run(["https://x", "o"], {"BROKER_URL": broker_url}, fake_open)
+    assert [b.get("reload") for _, b in Broker.seen] == [True, None]
+
+
+def test_moved_job_tab_says_so(broker_url, fake_open):
+    Broker.reply = {"already_open": True, "moved": True}
+    p = run(["https://x/2", "o"], {"BROKER_URL": broker_url}, fake_open)
+    assert p.returncode == 0 and "same job tab, moved to this page" in p.stdout
+
+
+def test_human_working_exits_4_and_never_falls_back(broker_url, fake_open):
+    Broker.code, Broker.reply = 423, {"error": "the human is working", "page": PAGE}
+    p = run(["https://p.example/optout", "tps"], {"BROKER_URL": broker_url}, fake_open)
+    assert p.returncode == 4
+    assert "human is working in that tab" in p.stderr and "filled: Email" in p.stderr
+    assert not fake_open[2].exists()
+
+
+def test_churn_exits_5_with_the_stop_message(broker_url, fake_open):
+    Broker.code, Broker.reply = 429, {"error": "stop: ask the human in one line", "stop_and_ask": True}
+    p = run(["https://p.example/optout", "tps"], {"BROKER_URL": broker_url}, fake_open)
+    assert p.returncode == 5 and "ask the human in one line" in p.stderr
+    assert not fake_open[2].exists()
+
+
+def test_other_refusals_never_fall_back_to_a_raw_open(broker_url, fake_open):
+    Broker.code, Broker.reply = 400, {"error": "show needs a url"}
+    p = run(["https://x"], {"BROKER_URL": broker_url}, fake_open)
+    assert p.returncode == 1 and "refused" in p.stderr
+    assert not fake_open[2].exists()
+
+
+BB_PEEK = os.path.join(ROOT, "bb-peek")
+
+
+def run_peek(args, env_extra, fake_open):
+    bindir, pydir, _ = fake_open
+    env = {"PATH": f"{bindir}:{pydir}:/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")}
+    env.update(env_extra)
+    return subprocess.run(["bash", BB_PEEK, *args], capture_output=True, text=True, env=env, timeout=30)
+
+
+def test_peek_prints_state_fields_and_human(broker_url, fake_open):
+    Broker.reply = {"tabs": [dict(PAGE, target="ABC", shown_by=["tps"], opened_by_broker=True)]}
+    p = run_peek(["tps", "200"], {"BROKER_URL": broker_url}, fake_open)
+    assert p.returncode == 0, p.stderr
+    assert Broker.seen[0][0] == "/peek?match=tps&chars=200"
+    assert "tab ABC, job of tps" in p.stdout and "url:    https://p.example/optout/success" in p.stdout
+    assert "filled: Email = m@example.com" in p.stdout and "HUMAN IS WORKING IN IT NOW" in p.stdout
+
+
+def test_peek_his_own_tab_and_no_match(broker_url, fake_open):
+    Broker.reply = {"tabs": [{"target": "H", "url": "u", "human": {}}]}
+    assert "the human (his own tab)" in run_peek(["u"], {"BROKER_URL": broker_url}, fake_open).stdout
+    Broker.reply = {"tabs": []}
+    p = run_peek(["nope"], {"BROKER_URL": broker_url}, fake_open)
+    assert p.returncode == 3 and "no open tab matches" in p.stderr
+
+
+def test_peek_usage_and_broker_down(fake_open):
+    assert run_peek([], {}, fake_open).returncode == 1
+    p = run_peek(["x"], {"BROKER_URL": "http://127.0.0.1:9"}, fake_open)
+    assert p.returncode == 1 and "could not look" in p.stderr

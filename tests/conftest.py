@@ -136,7 +136,11 @@ class Stack:
         self.clients = []
         self.fake = self.lt.run(FakeBrowser().start())
         self._saved = {k: getattr(proxy, k) for k in
-                       ("UPSTREAM", "LISTEN", "LOG", "STATE", "REG", "UP", "STAGE", "INNER_PORT")}
+                       ("UPSTREAM", "LISTEN", "LOG", "STATE", "REG", "UP", "STAGE", "INNER_PORT",
+                        "STAGE_ACTIVATE_APP", "HUMANS")}
+        proxy.HUMANS = proxy.Humans()       # no human activity carried over between tests
+        # Never bring a real window forward from a test run.
+        proxy.STAGE_ACTIVATE_APP = False
         proxy.UPSTREAM = self.fake.port
         proxy.LOG = str(tmp_path / "broker.log")
         proxy.STATE = str(tmp_path / "tabs.json")

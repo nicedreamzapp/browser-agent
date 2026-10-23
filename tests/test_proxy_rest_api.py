@@ -20,7 +20,7 @@ def test_lease_renew_release(stack):
     assert info["expires"] > before + 400
 
     code, r = http("POST", stack.api_base + "/release", {"lease_id": l["lease_id"]})
-    assert code == 200 and r == {"released": l["lease_id"]}
+    assert code == 200 and r == {"released": l["lease_id"], "tab_closed": True}
     assert tid not in stack.reg.tabs and tid not in stack.fake.targets
 
 

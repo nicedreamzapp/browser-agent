@@ -13,6 +13,15 @@ from the git history on `main`. Commit hashes link to GitHub.
 
 ## 2026-10-23
 
+- **When the human helps: five rules, enforced in code.** After agents fought the human over
+  one tab (open, fill, close, reopen, ten times over, wiping his typing and a solved captcha):
+  one tab per job, pinned to a site and shared between hidden and visible use; `bb-show` of an
+  open page brings it forward as is and prints its state, reloading only with `--reload`; new
+  `bb-peek` and `GET /peek` read any tab's URL, text, filled fields and human activity; a
+  trusted-input listener in every broker tab makes agent input, reloads, navigation and closes
+  wait while the human is working (HTTP 423, `bb-show` exit 4); a tab he is working in is never
+  closed by anything, a restarted broker included; and a job that opens and closes the same
+  page twice in 10 minutes is told to stop and ask (HTTP 429, `bb-show` exit 5).
 - **Close every tab you opened when the task is done.** New `bb-close <owner|url-substring>`
   and `POST /unshow` close the pages an agent put up with `bb-show`; `bb-show` now prints a
   reminder to run it. Only stage-opened tabs are closed, never a human tab that was refreshed

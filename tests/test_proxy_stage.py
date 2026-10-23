@@ -1,7 +1,9 @@
 """The stage: one agent at a time may put a page in front of the human."""
 import asyncio
+import os
 import sys
 import time
+import urllib.parse
 
 import pytest
 
@@ -61,11 +63,11 @@ def test_unstage_frees_it_now(stack):
     assert http("POST", stack.api_base + "/unstage", {}) == (200, {"freed": False})
 
 
-def test_reshow_closes_only_the_same_owners_previous_tab(stack):
+def test_moving_to_another_site_closes_only_the_same_owners_previous_tab(stack):
     _, a1 = show(stack, owner="a", url="https://a.example/1", dwell=0)
     _, b1 = show(stack, owner="b", url="https://b.example/1", dwell=0)
-    _, a2 = show(stack, owner="a", url="https://a.example/2", dwell=0)
-    assert a1["target_id"] not in stack.fake.targets      # a's stale copy is gone
+    _, a2 = show(stack, owner="a", url="https://c.example/2", dwell=0)
+    assert a1["target_id"] not in stack.fake.targets      # a's finished job is closed
     assert b1["target_id"] in stack.fake.targets          # b's page is not a's to close
     assert a2["target_id"] in stack.fake.targets
     st = http("GET", stack.api_base + "/stage")[1]
@@ -108,6 +110,7 @@ def test_front_activates_the_app_on_macos(stack, monkeypatch):
         calls.append(args)
         return P()
     monkeypatch.setattr(stack.proxy.sys, "platform", "darwin")
+    monkeypatch.setattr(stack.proxy, "STAGE_ACTIVATE_APP", True)
     monkeypatch.setattr(stack.proxy.asyncio, "create_subprocess_exec", fake_exec)
     stack.run(stack.proxy.STAGE._front("T1"))
     assert calls == [("osascript", "-e", f'tell application "{stack.proxy.BROWSER_APP}" to activate')]
@@ -125,8 +128,10 @@ def test_front_skips_app_activation_elsewhere(stack, monkeypatch):
     assert stack.fake.params_for("Target.activateTarget") == [{"targetId": "T1"}]
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="real osascript app activation is macOS only")
+@pytest.mark.skipif(sys.platform != "darwin" or os.environ.get("BB_TEST_REAL_FRONT") != "1",
+                    reason="brings a real app forward; macOS only, opt in with BB_TEST_REAL_FRONT=1")
 def test_front_real_osascript_on_macos(stack, monkeypatch):
+    monkeypatch.setattr(stack.proxy, "STAGE_ACTIVATE_APP", True)
     monkeypatch.setattr(stack.proxy, "BROWSER_APP", "Finder")
     stack.run(stack.proxy.STAGE._front("T1"))
 
@@ -154,7 +159,7 @@ def test_unshow_matches_a_url_substring_and_spares_other_owners(stack):
     assert rb["target_id"] in stack.fake.targets
 
 
-def test_unshow_never_closes_a_human_tab_it_only_refreshed(stack):
+def test_unshow_never_closes_a_human_tab_it_only_brought_forward(stack):
     human = stack.fake.add_human_tab(url="https://shop.example/order/1")
     code, r = show(stack, owner="a", url="https://shop.example/order/1", dwell=1)
     assert code == 200 and r["target_id"] == human
@@ -165,3 +170,87 @@ def test_unshow_never_closes_a_human_tab_it_only_refreshed(stack):
 
 def test_unshow_needs_a_match(stack):
     assert http("POST", stack.api_base + "/unshow", {})[0] == 400
+
+
+# ---------------------------------------------------------------------------
+# Look before you touch (2026-10-23). A page already open is brought forward as
+# it is, never reloaded unless the caller asks, and its state is handed back.
+# These tests use the fake browser only: no real tab is created and nothing is
+# brought to the front of a real screen.
+# ---------------------------------------------------------------------------
+def page_methods(stack, tid):
+    return [m for c, m, _ in stack.fake.calls if c == f"page:{tid}"]
+
+
+def test_show_of_an_open_page_does_not_reload_it(stack):
+    human = stack.fake.add_human_tab(url="https://people.example/optout", title="Opt out")
+    stack.fake.page_text[human] = "Your request has been submitted. Thank you."
+    code, r = show(stack, owner="a", url="https://people.example/optout#form", dwell=0)
+    assert code == 200, r
+    assert r["target_id"] == human and r["already_open"] is True and r["reloaded"] is False
+    assert "Page.navigate" not in page_methods(stack, human)
+    assert "Page.reload" not in page_methods(stack, human)
+    assert stack.fake.params_for("Target.createTarget") == []          # no duplicate copy
+    assert r["page"]["url"] == "https://people.example/optout"
+    assert r["page"]["title"] == "Opt out"
+    assert r["page"]["text"].startswith("Your request has been submitted")
+
+
+def test_show_twice_keeps_one_tab_and_never_reloads_it(stack):
+    code, r1 = show(stack, owner="a", url="https://form.example/step1", dwell=0)
+    assert code == 200 and r1["already_open"] is False
+    code, r2 = show(stack, owner="a", url="https://form.example/step1", dwell=0)
+    assert code == 200 and r2["target_id"] == r1["target_id"] and r2["already_open"] is True
+    assert len(stack.fake.params_for("Target.createTarget")) == 1
+    assert "Page.reload" not in page_methods(stack, r1["target_id"])
+    assert "Page.navigate" not in page_methods(stack, r1["target_id"])
+    # still the broker's own tab, so bb-close may close it
+    code, u = unshow(stack, "a")
+    assert [t["owner"] for t in u["closed"]] == ["a"]
+    assert r1["target_id"] not in stack.fake.targets
+
+
+def test_show_reloads_only_when_asked(stack):
+    human = stack.fake.add_human_tab(url="https://news.example/live")
+    code, r = show(stack, owner="a", url="https://news.example/live", dwell=0, reload=True)
+    assert code == 200 and r["target_id"] == human
+    assert r["already_open"] is True and r["reloaded"] is True and "page" not in r
+    assert page_methods(stack, human) == ["Page.navigate", "Page.reload"]
+
+
+def peek(stack, match, chars=None):
+    q = urllib.parse.urlencode({"match": match, **({"chars": chars} if chars else {})})
+    return http("GET", stack.api_base + "/peek?" + q)
+
+
+def test_peek_reads_a_human_tab_without_touching_it(stack):
+    human = stack.fake.add_human_tab(url="https://people.example/optout/done", title="Done")
+    stack.fake.page_text[human] = "Success! " + "x" * 1000
+    other = stack.fake.add_human_tab(url="https://elsewhere.example/")
+    before = len(stack.fake.calls)
+    code, r = peek(stack, "people.example")
+    assert code == 200 and len(r["tabs"]) == 1
+    (t,) = r["tabs"]
+    assert t["target"] == human[:12] and t["title"] == "Done"
+    assert t["url"] == "https://people.example/optout/done"
+    assert t["text"].startswith("Success!") and len(t["text"]) == 400
+    assert t["opened_by_broker"] is False and t["shown_by"] is None
+    touched = {m for _, m, _ in stack.fake.calls[before:]}
+    assert touched <= {"Target.getTargets", "Target.getTargetInfo", "Runtime.evaluate"}
+    assert not any(c == f"page:{other}" for c, _, _ in stack.fake.calls)
+    assert http("GET", stack.api_base + "/stage")[1]["held_by"] is None
+
+
+def test_peek_by_owner_and_char_limit(stack):
+    _, r = show(stack, owner="tps-agent", url="https://people.example/form", dwell=0)
+    stack.fake.page_text[r["target_id"]] = "abcdefghij" * 10
+    code, p = peek(stack, "tps-agent", chars=25)
+    assert code == 200 and len(p["tabs"]) == 1
+    assert p["tabs"][0]["shown_by"] == ["tps-agent"] and p["tabs"][0]["opened_by_broker"] is True
+    assert p["tabs"][0]["text"] == ("abcdefghij" * 3)[:25]
+    unshow(stack, "tps-agent")
+
+
+def test_peek_no_match_and_missing_match(stack):
+    assert peek(stack, "nothing-like-this") == (200, {"match": "nothing-like-this", "tabs": []})
+    assert http("GET", stack.api_base + "/peek")[0] == 400

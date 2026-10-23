@@ -17,6 +17,7 @@ import json, threading, time
 from contextlib import contextmanager
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 
 from websocket import create_connection
 
@@ -111,15 +112,34 @@ def lease(owner, url=None, purpose=None, hidden=True, ttl=TTL):
             pass  # the reaper will collect it
 
 
-def show(url, owner=None, purpose=None, wait=None, dwell=None):
+class HumanIsWorking(RuntimeError):
+    """The human is typing or clicking in that tab right now. Do not reload, reopen or
+    close it. `page` is what it shows at this moment: continue from there."""
+
+    def __init__(self, message, page=None):
+        super().__init__(message)
+        self.page = page or {}
+
+
+class StopAndAsk(RuntimeError):
+    """You have opened and closed this page too many times. Stop and ask the human
+    in one line what is wrong. Retrying is what this exists to prevent."""
+
+
+def show(url, owner=None, purpose=None, wait=None, dwell=None, reload=False):
     """Put a page in front of the human, taking turns with every other agent.
 
     Use this instead of `open -a "Brave Browser" <url>` or AppleScript activate.
     Those go straight to macOS, around the proxy, and two agents doing it minutes
     apart is what throws his window back and forth. This queues.
 
-    Returns the broker's reply. Raises RuntimeError if the screen was busy for
-    longer than `wait` -- print the URL and move on rather than forcing it.
+    `owner` is your job. The job owns one tab on one site until unshow(owner).
+    Showing the same site again returns that tab AS IS (reply["already_open"]),
+    with reply["page"] holding what it shows now: read it before acting. It is
+    reloaded only with reload=True, and never while the human works in it.
+
+    Raises RuntimeError if the screen was busy for longer than `wait` (print the
+    URL and move on), HumanIsWorking (continue from e.page) or StopAndAsk.
     """
     body = {"owner": owner or os.environ.get("BROKER_OWNER") or "anonymous", "url": url,
             "purpose": purpose}
@@ -127,22 +147,44 @@ def show(url, owner=None, purpose=None, wait=None, dwell=None):
         body["wait"] = wait
     if dwell is not None:
         body["dwell"] = dwell
+    if reload:
+        body["reload"] = True
     try:
         return _post("/show", body)
     except HTTPError as e:
+        if e.code not in (409, 423, 429):
+            raise
+        d = json.loads(e.read() or b"{}")
         if e.code == 409:
-            d = json.loads(e.read() or b"{}")
             raise RuntimeError(
                 f"screen busy: {d.get('held_by')} is showing {d.get('showing')} "
                 f"for another {d.get('seconds_left')}s") from None
-        raise
+        if e.code == 423:
+            raise HumanIsWorking(d.get("error", "the human is working in that tab"), d.get("page")) from None
+        if e.code == 429:
+            raise StopAndAsk(d.get("error", "stop and ask the human")) from None
+
+
+def peek(match, chars=400):
+    """Read-only state of every open tab matching `match` (a job owner, a lease owner,
+    a target id, or part of a URL): url, title, text, filled fields (secrets masked)
+    and human = {active, human_active_since, last_input_seconds_ago, inputs}.
+    Call it before every step on a page the human might touch."""
+    with urlopen(BROKER + "/peek?" + urlencode({"match": match, "chars": chars}), timeout=30) as r:
+        return json.load(r)["tabs"]
+
+
+def human_active(match):
+    """True when the human is working, right now, in any tab matching `match`."""
+    return any((t.get("human") or {}).get("active") for t in peek(match, chars=0))
 
 
 def unshow(match):
     """Close the page(s) you put up with show(), by owner or URL substring.
 
     Rule: close every tab you opened the moment its task is done. Only tabs the
-    broker opened are closed; the human's own tabs are left alone."""
+    broker opened are closed; the human's own tabs, and any tab he is working in
+    right now, are left to him (reply["left_open"] says which and why)."""
     return _post("/unshow", {"match": match})
 
 

@@ -1,0 +1,52 @@
+#!/bin/bash
+# bb-peek — look at a page before you touch it. Read only.
+#
+# Matt (2026-10-23): "I filled out TruePeopleSearch and hit send and it okayed it.
+# Now you didn't recognize that on the screen and you're doing it again."
+# Run this BEFORE every step on a page the human might have touched. For every
+# open tab that matches it prints the current URL, title, the start of the visible
+# text, the form fields that hold something (passwords and card numbers masked),
+# and whether the human is working in it right now. Tabs the human opened himself
+# match too. It never reloads, focuses, navigates or types; nothing on his screen
+# changes.
+#
+#   bb-peek <owner|url-substring|target-id> [chars]
+#
+# Exit 0 found something · 3 nothing matched · 1 error / broker down.
+set -u
+API="${BROKER_URL:-http://127.0.0.1:9223}"
+MATCH="${1:-}"; CHARS="${2:-400}"
+[ -z "$MATCH" ] && { echo "usage: bb-peek <owner|url-substring|target-id> [chars]" >&2; exit 1; }
+
+Q=$(MATCH="$MATCH" CHARS="$CHARS" python3 -c '
+import os, urllib.parse
+print(urllib.parse.urlencode({"match": os.environ["MATCH"], "chars": os.environ["CHARS"]}))')
+OUT=$(curl -sS -m 30 -w $'\n%{http_code}' "$API/peek?$Q" 2>/dev/null)
+CODE=$(printf '%s' "$OUT" | tail -1)
+JSON=$(printf '%s' "$OUT" | sed '$d')
+
+if [ "$CODE" != "200" ]; then
+  echo "broker not answering (code=${CODE:-none}) — could not look. $JSON" >&2
+  exit 1
+fi
+JSON="$JSON" python3 -c '
+import json,os,sys
+d=json.loads(os.environ["JSON"])
+tabs=d.get("tabs",[])
+for t in tabs:
+    who = ", ".join(t.get("shown_by") or []) or t.get("leased_by") \
+          or ("an agent" if t.get("opened_by_broker") else "the human (his own tab)")
+    print("tab %s, job of %s" % (t.get("target"), who))
+    print("  url:    %s" % t.get("url",""))
+    print("  title:  %s" % t.get("title",""))
+    print("  shows:  %s" % (t.get("text") or "(no text)"))
+    for f in t.get("fields") or []:
+        print("  filled: %s = %s" % (f.get("field"), f.get("value")))
+    h = t.get("human") or {}
+    if h.get("active"):
+        print("  HUMAN IS WORKING IN IT NOW (last input %ss ago). Do not reload, navigate or close it;"
+              " wait, then continue from what it shows." % h.get("last_input_seconds_ago"))
+    elif h.get("inputs"):
+        print("  the human worked in it earlier (last input %ss ago): build on what he did" % h.get("last_input_seconds_ago"))
+    if t.get("note"): print("  note:   %s" % t["note"])
+sys.exit(0 if tabs else 3)' || { rc=$?; [ $rc -eq 3 ] && echo "no open tab matches: $MATCH" >&2; exit $rc; }

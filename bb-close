@@ -9,7 +9,7 @@
 #
 # Matches the owner name you gave bb-show, or any part of the page URL.
 # Only tabs the broker itself opened are closed; a tab the human already had
-# open (that bb-show merely refreshed in place) is left alone.
+# open, or is working in right now, is left to him (bb-close says so).
 #
 # Exit 0 closed something · 3 nothing matched · 1 error / broker down.
 set -u

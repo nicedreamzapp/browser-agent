@@ -11,6 +11,7 @@ No real browser, no network beyond 127.0.0.1, no OS-specific APIs.
 import asyncio
 import itertools
 import json
+import re
 import uuid
 
 from websockets.asyncio.server import serve
@@ -42,6 +43,10 @@ class FakeBrowser:
         self._server = None
         self._sid = itertools.count(1)
         self.fail = {}               # method -> error message, to simulate failures
+        self.page_text = {}          # targetId -> visible text a peek should read back
+        self.page_fields = {}        # targetId -> [{"field", "value"}] a peek should read back
+        self.page_events = {}        # targetId -> [[t, kind]] the in-page listener has recorded
+        self.watchers = {}           # targetId -> [page sockets that added the broker's binding]
 
     # ---- test helpers ----------------------------------------------------
     def add_human_tab(self, url="https://mail.example.com/inbox", title="Inbox"):
@@ -51,6 +56,19 @@ class FakeBrowser:
                              "attached": False, "canAccessOpener": False,
                              "browserContextId": "DEFAULT"}
         return tid
+
+    async def human(self, tid, kind="keydown", t=None):
+        """Simulate the person typing or clicking in tab `tid`: the in-page listener
+        records it and calls the broker's binding, exactly as the injected script does."""
+        import time
+        t = time.time() if t is None else t
+        self.page_events.setdefault(tid, []).append([t, kind])
+        payload = json.dumps([t, kind])
+        for ws in list(self.watchers.get(tid, [])):
+            await ws.send(json.dumps({"method": "Runtime.bindingCalled",
+                                      "params": {"name": "__bbHumanEvent", "payload": payload,
+                                                 "executionContextId": 1}}))
+        return t
 
     def methods(self, channel=None):
         return [m for c, m, _ in self.calls if channel is None or c == channel]
@@ -95,18 +113,46 @@ class FakeBrowser:
         if tid not in self.targets:
             await ws.close(1008, "no such target")
             return
-        async for raw in ws:
-            m = json.loads(raw)
-            self.calls.append((f"page:{tid}", m.get("method"), m.get("params") or {}))
-            if m.get("method") == "Runtime.evaluate":
-                result = {"result": {"type": "string",
-                                     "value": f"evaluated {m['params']['expression']} in {tid}"}}
-            else:
-                result = {"echo": m.get("method"), "targetId": tid}
-            out = {"id": m.get("id"), "result": result}
-            if "sessionId" in m:
-                out["sessionId"] = m["sessionId"]
-            await ws.send(json.dumps(out))
+        # The broker's human-activity watcher holds one page socket open per tab
+        # and opens with Runtime.addBinding. Its traffic is recorded on its own
+        # channel, "watch:<tid>", so tests about what agents send stay exact.
+        channel = f"page:{tid}"
+        try:
+            async for raw in ws:
+                m = json.loads(raw)
+                params = m.get("params") or {}
+                if m.get("method") == "Runtime.addBinding" and params.get("name") == "__bbHumanEvent":
+                    channel = f"watch:{tid}"
+                    self.watchers.setdefault(tid, []).append(ws)
+                self.calls.append((channel, m.get("method"), params))
+                await self._page_reply(ws, tid, m)
+        finally:
+            if ws in self.watchers.get(tid, []):
+                self.watchers[tid].remove(ws)
+
+    async def _page_reply(self, ws, tid, m):
+        expr = (m.get("params") or {}).get("expression", "")
+        if m.get("method") == "Page.navigate" and tid in self.targets:
+            self.targets[tid]["url"] = (m.get("params") or {}).get("url", "")
+        if m.get("method") == "Runtime.evaluate" and "innerText" in expr and tid in self.targets:
+            t = self.targets[tid]
+            cut = re.search(r"const n = (\d+);", expr)
+            text = self.page_text.get(tid, "")[:int(cut.group(1)) if cut else None]
+            result = {"result": {"type": "string", "value": json.dumps(
+                {"url": t["url"], "title": t["title"], "text": text,
+                 "fields": self.page_fields.get(tid, []),
+                 "human": self.page_events.get(tid, [])})}}
+        elif m.get("method") == "Runtime.evaluate" and "__bbHuman.events" in expr and tid in self.targets:
+            result = {"result": {"type": "string", "value": json.dumps(self.page_events.get(tid, []))}}
+        elif m.get("method") == "Runtime.evaluate":
+            result = {"result": {"type": "string",
+                                 "value": f"evaluated {m['params']['expression']} in {tid}"}}
+        else:
+            result = {"echo": m.get("method"), "targetId": tid}
+        out = {"id": m.get("id"), "result": result}
+        if "sessionId" in m:
+            out["sessionId"] = m["sessionId"]
+        await ws.send(json.dumps(out))
 
     async def _emit(self, conn, method, params, session_id=None):
         msg = {"method": method, "params": params}

@@ -76,6 +76,14 @@ POOL_HOLD = 10                     # seconds a listed pool tab is reserved for i
 BROWSER_APP = os.environ.get("BROWSER_APP", "Brave Browser")   # for the one allowed activate
 STAGE_DWELL = int(os.environ.get("BROKER_STAGE_DWELL", 20))    # seconds a shown page is protected
 STAGE_WAIT = int(os.environ.get("BROKER_STAGE_WAIT", 30))      # seconds a caller will queue
+# The macOS app-activation step of the stage. The test suite turns it off so a
+# test run never brings a real window forward on the machine running it.
+STAGE_ACTIVATE_APP = os.environ.get("BROKER_STAGE_ACTIVATE_APP", "1") != "0"
+# The five rules (2026-10-23). See "When the human helps" in the README.
+HUMAN_QUIET = int(os.environ.get("BROKER_HUMAN_QUIET", 20))     # seconds his last input protects a tab
+AGENT_ECHO = 1.5                   # trusted events this soon after an agent's own CDP input are the agent's
+CHURN_WINDOW = int(os.environ.get("BROKER_CHURN_WINDOW", 600))  # seconds an open/close cycle is remembered
+CHURN_LIMIT = int(os.environ.get("BROKER_CHURN_LIMIT", 2))      # cycles allowed before "stop and ask"
 
 
 def log(msg):
@@ -190,13 +198,26 @@ class Registry:
             live = {t["targetId"] for t in (await self.up.send("Target.getTargets")).get("targetInfos", [])}
         except Exception:
             return
+        closed = 0
         for tid in old & live:
+            # 2026-10-23: a broker restarted mid-task closed a tab the human had
+            # been working in. The listener's record lives in the page itself, so
+            # it outlasts the broker: a leftover he ever typed in is his now.
+            try:
+                touched = bool(json.loads(await page_eval(tid, "JSON.stringify("
+                               "(window.__bbHuman && window.__bbHuman.events) || [])", 3) or "[]"))
+            except Exception:
+                touched = False
+            if touched:
+                log(f"left tab {tid[:12]} from the last run open: the human worked in it")
+                continue
             try:
                 await self.up.send("Target.closeTarget", targetId=tid)
+                closed += 1
             except Exception:
                 pass
-        if old & live:
-            log(f"closed {len(old & live)} tab(s) left over from the last run")
+        if closed:
+            log(f"closed {closed} tab(s) left over from the last run")
         self._save()
 
     async def create(self, owner, url, hidden=True, kind="rest", ttl=None, context=None):
@@ -220,7 +241,20 @@ class Registry:
                           "lease_id": uuid.uuid4().hex[:12] if kind == "rest" else None,
                           "listed_until": 0}
         self._save()
+        HUMANS.watch(tid)
         log(f"tab {tid[:12]} -> {owner} ({kind}{', hidden' if hidden else ''})")
+        return tid
+
+    async def adopt(self, tid, owner, ttl):
+        """Lease an existing job tab instead of opening a copy of it (rule 1).
+
+        The tab stays the job's: releasing this lease never closes it, bb-close does."""
+        self.tabs[tid] = {"owner": owner, "kind": "rest", "hidden": False, "created": time.time(),
+                          "attached": 1, "expires": time.time() + ttl,
+                          "lease_id": uuid.uuid4().hex[:12], "listed_until": 0, "shared": True}
+        self._save()
+        HUMANS.watch(tid)
+        log(f"tab {tid[:12]} -> {owner} (lease on its own shown job tab, no copy opened)")
         return tid
 
     def owned_by(self, owner):
@@ -233,15 +267,31 @@ class Registry:
                 if i["kind"] == "pool" and i["attached"] == 0 and i["listed_until"] <= now]
 
     async def close(self, tid, why=""):
+        """Close a tab the broker made. True if it closed.
+
+        Two exceptions, and both leave the tab open: it is also an open job tab
+        on the human's screen (bb-close finishes that), or the human is working
+        in it right now (rule 4: it is his, and closing it would wipe his work)."""
         info = self.tabs.pop(tid, None)
         if info is None:
-            return
+            return False
         self._save()
+        if STAGE is not None and STAGE.job_of(tid):
+            log(f"tab {tid[:12]} lease ended ({info['owner']}, {why or 'released'}); kept open, "
+                f"it is the shown job tab of {STAGE.job_of(tid)}")
+            return False
+        if HUMANS.active(tid):
+            HUMANS.forget(tid)
+            log(f"tab {tid[:12]} left open for the human ({info['owner']}, {why or 'released'}): "
+                f"he is working in it")
+            return False
+        HUMANS.forget(tid)
         try:
             await self.up.send("Target.closeTarget", targetId=tid)
         except Exception:
             pass
         log(f"tab {tid[:12]} closed ({info['owner']}{', ' + why if why else ''})")
+        return True
 
     async def release_owner(self, owner, why="client disconnected"):
         for tid in self.owned_by(owner):
@@ -265,6 +315,7 @@ class Registry:
         gone = [tid for tid in self.tabs if tid not in live]
         for tid in gone:
             self.tabs.pop(tid, None)
+            HUMANS.forget(tid)
         if gone:
             self._save()
 
@@ -285,12 +336,291 @@ class Registry:
 
 
 # ---------------------------------------------------------------------------
+# the human: notice when he is working in a tab (rules 2-4, 2026-10-23)
+# ---------------------------------------------------------------------------
+# Matt, 2026-10-23: agents opened a tab, started a form, closed it, opened it again
+# "over 10 times right before my eyes". When he typed in the form or solved the
+# captcha himself, the agent never noticed: it reloaded or re-showed the page and
+# wiped his work. Everything below exists so the broker can tell, in code, that a
+# person is using a tab, and refuse to pull it out from under him.
+
+# Injected into every tab the broker opens or shows. It records trusted input
+# only (event.isTrusted: a real keyboard or mouse; a page script cannot fake it)
+# and reports it two ways: a window variable any reader can poll, and a CDP
+# binding that pushes each event to the broker the moment it happens, which
+# also survives the page navigating away (a submitted form). Focus moving into
+# an iframe counts too, because a cross-site captcha frame never lets its own
+# clicks bubble up to the page. CDP Input events an agent sends are trusted as
+# well; the broker sees those go through and discounts them (AGENT_ECHO).
+HUMAN_BINDING = "__bbHumanEvent"
+HUMAN_JS = r"""(() => {
+  if (window.__bbHuman) return 'already';
+  const s = {v: 1, events: []};
+  try { Object.defineProperty(window, '__bbHuman', {value: s}); } catch (e) { return 'blocked'; }
+  let last = 0;
+  const send = (kind) => {
+    const t = Date.now() / 1000;
+    if (t - last < 0.25) return;
+    last = t;
+    s.events.push([t, kind]);
+    if (s.events.length > 50) s.events.shift();
+    try { if (typeof window.__bbHumanEvent === 'function') window.__bbHumanEvent(JSON.stringify([t, kind])); } catch (e) {}
+  };
+  const note = (e) => { if (e.isTrusted) send(e.type); };
+  for (const k of ['pointerdown', 'keydown', 'input', 'paste', 'change']) addEventListener(k, note, true);
+  addEventListener('blur', (e) => {
+    if (!e.isTrusted || e.target !== window) return;
+    setTimeout(() => { const a = document.activeElement; if (a && a.tagName === 'IFRAME') send('frame'); }, 0);
+  }, true);
+  return 'installed';
+})()"""
+
+
+def page_key(url):
+    """What "the same page" means everywhere here: the URL without its #fragment or trailing slash."""
+    return (url or "").split("#", 1)[0].rstrip("/")
+
+
+def site_of(url):
+    """The site a job is pinned to: the host without www. (the page itself when there is no host)."""
+    try:
+        host = (urlparse(url or "").hostname or "").lower()
+    except ValueError:
+        host = ""
+    return (host[4:] if host.startswith("www.") else host) or page_key(url)
+
+
+async def page_eval(tid, expr, timeout=5):
+    """Evaluate `expr` in tab `tid` over a short-lived page socket and return its value.
+
+    One Runtime.evaluate, nothing else: no navigation, no focus, no input."""
+    async with ws_connect(f"ws://127.0.0.1:{UPSTREAM}/devtools/page/{tid}", max_size=None) as ws:
+        await ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate",
+                                  "params": {"expression": expr, "returnByValue": True}}))
+        while True:
+            m = json.loads(await asyncio.wait_for(ws.recv(), timeout))
+            if m.get("id") == 1:
+                return m.get("result", {}).get("result", {}).get("value")
+
+
+class HumanBusy(Exception):
+    """An agent asked to reload, navigate, close or type into a tab the human is using."""
+
+    def __init__(self, tid, seconds_ago, action):
+        self.tid, self.seconds_ago, self.action = tid, seconds_ago, action
+        super().__init__(
+            f"the human is working in this tab right now (his last input was {seconds_ago:.0f}s ago), "
+            f"so it was not {action}. Re-read the page (bb-peek) and continue from what it shows; "
+            f"do not start over.")
+
+
+class Humans:
+    """Per tab: when did a person last type, click or paste in it?
+
+    A tab counts as in use for HUMAN_QUIET seconds after his last input. While it
+    is, no agent may reload it, navigate it, close it or send it input, through any
+    path the broker controls."""
+
+    def __init__(self):
+        self.events = {}     # tid -> [(epoch seconds, kind)], oldest first
+        self.agent = {}      # tid -> [epoch seconds an agent sent CDP input]
+        self.tasks = {}      # tid -> the watcher task holding the listener in place
+
+    # ---- what happened -------------------------------------------------------
+    def agent_input(self, tid, t=None):
+        a = self.agent.setdefault(tid, [])
+        a.append(time.time() if t is None else t)
+        del a[:-200]
+
+    def _is_echo(self, tid, t):
+        return any(a - 0.25 <= t <= a + AGENT_ECHO for a in self.agent.get(tid, ()))
+
+    def note(self, tid, t, kind):
+        """Record one trusted input event. False when it was really the agent's own input."""
+        if self._is_echo(tid, t):
+            return False
+        ev = self.events.setdefault(tid, [])
+        if (t, kind) in ev:
+            return False
+        ev.append((t, kind))
+        ev.sort()
+        del ev[:-100]
+        return True
+
+    def merge(self, tid, events):
+        """Fold in events read back from the page's own window.__bbHuman record."""
+        for e in events or ():
+            try:
+                self.note(tid, float(e[0]), str(e[1])[:20])
+            except (TypeError, ValueError, IndexError):
+                pass
+
+    # ---- what that means -----------------------------------------------------
+    def last(self, tid):
+        ev = self.events.get(tid)
+        return ev[-1][0] if ev else None
+
+    def seconds_ago(self, tid, now=None):
+        t = self.last(tid)
+        return None if t is None else max(0.0, (now or time.time()) - t)
+
+    def active(self, tid, now=None):
+        ago = self.seconds_ago(tid, now)
+        return ago is not None and ago < HUMAN_QUIET
+
+    def since(self, tid):
+        """Start of his current stretch of work in this tab (inputs less than HUMAN_QUIET apart)."""
+        ev = self.events.get(tid)
+        if not ev:
+            return None
+        start = ev[-1][0]
+        for t, _ in reversed(ev[:-1]):
+            if start - t >= HUMAN_QUIET:
+                break
+            start = t
+        return start
+
+    def info(self, tid, now=None):
+        now = now or time.time()
+        ago = self.seconds_ago(tid, now)
+        return {"active": self.active(tid, now),
+                "human_active_since": round(self.since(tid), 3) if self.active(tid, now) else None,
+                "last_input_seconds_ago": None if ago is None else round(ago, 1),
+                "inputs": len(self.events.get(tid, ())),
+                "watched": tid in self.tasks}
+
+    def guard(self, tid, action):
+        """Raise HumanBusy if the human is using `tid`. `action` reads "reloaded", "closed"..."""
+        if tid and self.active(tid):
+            raise HumanBusy(tid, self.seconds_ago(tid), action)
+
+    # ---- the listener --------------------------------------------------------
+    def watch(self, tid):
+        """Put the listener in tab `tid` and keep it there across navigations.
+
+        A script added with Page.addScriptToEvaluateOnNewDocument lives only as
+        long as the session that added it, so this holds one quiet page socket
+        open per watched tab, for as long as the tab exists."""
+        if tid and tid not in self.tasks:
+            self.tasks[tid] = asyncio.ensure_future(self._watch(tid))
+
+    def forget(self, tid):
+        task = self.tasks.pop(tid, None)
+        if task is not None:
+            task.cancel()
+        self.events.pop(tid, None)
+        self.agent.pop(tid, None)
+
+    async def _watch(self, tid):
+        me = asyncio.current_task()
+        try:
+            async with ws_connect(f"ws://127.0.0.1:{UPSTREAM}/devtools/page/{tid}", max_size=None) as ws:
+                setup = [("Runtime.addBinding", {"name": HUMAN_BINDING}),
+                         ("Runtime.enable", {}),
+                         ("Page.enable", {}),
+                         ("Page.addScriptToEvaluateOnNewDocument", {"source": HUMAN_JS}),
+                         ("Runtime.evaluate", {"expression": HUMAN_JS})]
+                for i, (method, params) in enumerate(setup, 1):
+                    await ws.send(json.dumps({"id": i, "method": method, "params": params}))
+                async for raw in ws:
+                    m = json.loads(raw)
+                    p = m.get("params") or {}
+                    if m.get("method") == "Runtime.bindingCalled" and p.get("name") == HUMAN_BINDING:
+                        try:
+                            t, kind = json.loads(p.get("payload") or "[]")
+                            if self.note(tid, float(t), str(kind)[:20]):
+                                log(f"human input in tab {tid[:12]} ({kind})")
+                        except (TypeError, ValueError):
+                            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass          # the tab closed, or the browser went away: nothing left to watch
+        finally:
+            if self.tasks.get(tid) is me:
+                self.tasks.pop(tid, None)
+
+
+HUMANS = Humans()
+
+
+async def agent_gate(tid, method, params):
+    """The refusal text when an agent may not send `method` to tab `tid` right now, else None.
+
+    Rule 3: while the human is working in a tab, agents keep their hands off it.
+    Rule 4: a tab that is on screen for a job is never reloaded or reopened mid-job.
+    Called for every command an agent sends through the proxy to a tab."""
+    if not method:
+        return None
+    if method.startswith("Input."):
+        if HUMANS.active(tid):
+            return str(HumanBusy(tid, HUMANS.seconds_ago(tid), "typed or clicked in"))
+        HUMANS.agent_input(tid)
+        return None
+    if method in ("Page.reload", "Page.navigate", "Target.closeTarget"):
+        verb = {"Page.reload": "reloaded", "Page.navigate": "navigated", "Target.closeTarget": "closed"}[method]
+        if HUMANS.active(tid):
+            return str(HumanBusy(tid, HUMANS.seconds_ago(tid), verb))
+        owner = STAGE.job_of(tid) if STAGE is not None else None
+        if owner is None:
+            return None
+        if method == "Page.navigate":
+            try:
+                cur = (await UP.send("Target.getTargetInfo", targetId=tid)).get("targetInfo", {}).get("url", "")
+            except Exception:
+                cur = ""
+            if page_key(cur) != page_key((params or {}).get("url")):
+                return None       # going somewhere new is work, not a reload
+        return (f"this tab is on screen for the job \"{owner}\" and that job is not done, so it was not "
+                f"{verb}. Read what it shows now and continue from there. If you are stuck, stop and ask "
+                f"the human in one line. The job's tab closes with bb-close {owner}.")
+    return None
+
+
+# ---------------------------------------------------------------------------
 # the stage: the human's screen, held by one agent at a time
 # ---------------------------------------------------------------------------
 class StageBusy(Exception):
     def __init__(self, holder, seconds_left, url):
         self.holder, self.seconds_left, self.url = holder, seconds_left, url
         super().__init__(f"stage held by {holder} for another {seconds_left}s")
+
+
+class StopAndAsk(Exception):
+    """Rule 5: an agent that keeps opening and closing the same page is stuck. Refuse it."""
+
+    def __init__(self, owner, url, times, minutes):
+        self.owner, self.url = owner, url
+        super().__init__(
+            f"stop: \"{owner}\" has opened and closed {url} {times} times in the last {minutes} minutes. "
+            f"It was not opened again. Do not retry. Ask the human in one line what is wrong "
+            f"(bb-peek {owner} shows what the page says right now).")
+
+
+PEEK_JS = r"""(() => {
+  const n = %d;
+  const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const label = (el) => clean(el.getAttribute('aria-label')
+    || (el.labels && el.labels.length ? el.labels[0].innerText : '')
+    || el.placeholder || el.name || el.id || el.type).slice(0, 60);
+  const secret = (el, name) => el.type === 'password'
+    || /^cc-|one-time-code|password/.test(el.autocomplete || '')
+    || /card|cvv|cvc|ssn|social security|security code|passcode|\bpin\b/i.test(name);
+  const fields = [];
+  for (const el of document.querySelectorAll('input, textarea, select')) {
+    const t = (el.type || '').toLowerCase();
+    if (['hidden', 'submit', 'button', 'reset', 'image', 'file'].includes(t)) continue;
+    const v = (t === 'checkbox' || t === 'radio') ? (el.checked ? 'checked' : '') : el.value;
+    if (!v) continue;
+    const name = label(el);
+    fields.push({field: name, value: secret(el, name) ? '(hidden)' : String(v).slice(0, 80)});
+    if (fields.length >= 30) break;
+  }
+  const h = window.__bbHuman;
+  return JSON.stringify({url: location.href, title: document.title,
+    text: clean(document.body && document.body.innerText).slice(0, n), fields: fields,
+    human: h && Array.isArray(h.events) ? h.events.slice(-50) : []});
+})()"""
 
 
 class Stage:
@@ -310,6 +640,13 @@ class Stage:
     Holding the stage does not block the caller: show() returns as soon as the
     page is up, and the hold decays on its own. A second agent that arrives while
     the page is fresh waits its turn instead of yanking the window mid-sentence.
+
+    Jobs (2026-10-23). The owner name an agent passes is its job. A job owns
+    exactly one tab, pinned to one site, from its first show until bb-close:
+      * showing the same site again returns that same tab, as it is now;
+      * it is never reloaded unless the caller asks, and never while the human
+        is working in it;
+      * opening and closing the same page over and over is refused (rule 5).
     """
 
     def __init__(self, up):
@@ -320,15 +657,55 @@ class Stage:
         self.url = None
         self.purpose = None
         self.until = 0
-        self.tabs = {}           # owner -> that owner's stage tab; nobody closes another's
-        self.created = set()     # stage tabs the broker itself opened; only these may be closed by /unshow
+        self.tabs = {}           # owner -> that owner's job tab; nobody closes another's
+        self.jobs = {}           # owner -> {"site", "asked", "keys", "since"}
+        self.created = set()     # job tabs the broker itself opened; only these may be closed
+        self.churn = {}          # (owner, page key) -> times that job was closed or reloaded
 
     def state(self):
         left = round(max(0.0, self.until - time.time()), 1)
         return {"held_by": self.holder if left else None, "showing": self.url if left else None,
                 "purpose": self.purpose if left else None, "seconds_left": left,
                 "tab": (self.tabs.get(self.holder) or "")[:12] or None,
-                "tabs": {o: t[:12] for o, t in self.tabs.items()}}
+                "tabs": {o: t[:12] for o, t in self.tabs.items()},
+                "jobs": {o: {"site": j["site"], "tab": self.tabs.get(o, "")[:12],
+                             "open_for": round(time.time() - j["since"]),
+                             "human": HUMANS.info(self.tabs.get(o, ""))}
+                         for o, j in self.jobs.items()}}
+
+    def job_of(self, tid):
+        """The owner whose open job this tab is, or None."""
+        for o, t in self.tabs.items():
+            if t == tid:
+                return o
+        return None
+
+    def job_tab(self, owner, url):
+        """The tab of `owner`'s open job when that job is on the same site as `url`."""
+        job = self.jobs.get(owner)
+        if job and self.tabs.get(owner) and job["site"] == site_of(url):
+            return self.tabs[owner]
+        return None
+
+    # ---- rule 5: churn -------------------------------------------------------
+    def _churn_count(self, owner, key):
+        now = time.time()
+        hits = [t for t in self.churn.get((owner, key), ()) if now - t < CHURN_WINDOW]
+        if hits:
+            self.churn[(owner, key)] = hits
+        else:
+            self.churn.pop((owner, key), None)
+        return len(hits)
+
+    def _refuse_churn(self, owner, url):
+        n = self._churn_count(owner, page_key(url))
+        if n >= CHURN_LIMIT:
+            log(f"stage: refused {owner} reopening {url}: {n} open/close cycles in {CHURN_WINDOW}s")
+            raise StopAndAsk(owner, page_key(url), n, max(1, CHURN_WINDOW // 60))
+
+    def _note_churn(self, owner, keys):
+        for k in keys:
+            self.churn.setdefault((owner, k), []).append(time.time())
 
     async def _front(self, tid):
         """Bring the page, and on macOS the app, to the front. Exactly once.
@@ -340,7 +717,7 @@ class Stage:
             await self.up.send("Target.activateTarget", targetId=tid)
         except Exception as e:
             log(f"stage: activateTarget failed ({e})")
-        if sys.platform == "darwin":
+        if sys.platform == "darwin" and STAGE_ACTIVATE_APP:
             try:
                 pr = await asyncio.create_subprocess_exec(
                     "osascript", "-e", f'tell application "{BROWSER_APP}" to activate',
@@ -349,7 +726,7 @@ class Stage:
             except Exception as e:
                 log(f"stage: activate failed ({e})")
 
-    async def show(self, owner, url, purpose=None, wait=None, dwell=None):
+    async def show(self, owner, url, purpose=None, wait=None, dwell=None, reload=False):
         wait = STAGE_WAIT if wait is None else int(wait)
         dwell = STAGE_DWELL if dwell is None else int(dwell)
         try:
@@ -367,107 +744,220 @@ class Stage:
         self._serial += 1
         mine = self._serial
         try:
-            return await self._show_locked(mine, owner, url, purpose, dwell)
+            return await self._show_locked(mine, owner, url, purpose, dwell, reload)
         except BaseException:
-            # A bad URL, Brave being down, or the caller giving up must not leave
-            # the screen locked: every later /show would get 409 until /unstage.
+            # A bad URL, Brave being down, a refusal, or the caller giving up must
+            # not leave the screen locked: every later /show would get 409.
             self.free(mine)
             raise
 
-    async def _tab_showing(self, url):
-        """Target id of an open page tab already on this URL (fragment ignored), or None."""
-        want = url.split("#", 1)[0].rstrip("/")
+    async def _live(self):
+        """targetId -> targetInfo for every open page."""
         try:
             infos = (await self.up.send("Target.getTargets")).get("targetInfos", [])
         except Exception:
-            return None
-        mine = set(self.tabs.values())
-        hits = [t for t in infos if t.get("type") == "page"
-                and t.get("url", "").split("#", 1)[0].rstrip("/") == want]
-        # Prefer a tab the stage already put up, then any other.
-        hits.sort(key=lambda t: t["targetId"] not in mine)
-        return hits[0]["targetId"] if hits else None
+            return {}
+        return {t["targetId"]: t for t in infos if t.get("type") == "page"}
 
-    async def _navigate(self, tid, url):
-        """Reload tab `tid` in place at `url` (fresh copy, cache bypassed). True on success."""
-        try:
-            async with ws_connect(f"ws://127.0.0.1:{UPSTREAM}/devtools/page/{tid}", max_size=None) as ws:
-                await ws.send(json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": url}}))
-                await asyncio.wait_for(ws.recv(), 10)
+    def _tab_showing(self, url, live, owner):
+        """A tab to reuse instead of opening a copy, or None.
+
+        In order: a job tab already on this page; this owner's own hidden (leased)
+        tab on this page or this site, so a job never hops between a hidden and a
+        visible copy; then any tab on this page, the human's own included."""
+        want, site = page_key(url), site_of(url)
+        shown = set(self.tabs.values())
+        leased = [t for t, i in (REG.tabs.items() if REG is not None else ()) if i["owner"] == owner]
+        same = [t for t, i in live.items() if page_key(i.get("url", "")) == want]
+        for pool in ([t for t in same if t in shown], [t for t in same if t in leased],
+                     [t for t in leased if t in live and site_of(live[t].get("url", "")) == site], same):
+            if pool:
+                return pool[0]
+        return None
+
+    async def _navigate(self, tid, url, reload=False):
+        """Move tab `tid` to `url` in place; with reload=True, a fresh copy (cache bypassed)."""
+        async with ws_connect(f"ws://127.0.0.1:{UPSTREAM}/devtools/page/{tid}", max_size=None) as ws:
+            await ws.send(json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": url}}))
+            await asyncio.wait_for(ws.recv(), 10)
+            if reload:
                 await ws.send(json.dumps({"id": 2, "method": "Page.reload", "params": {"ignoreCache": True}}))
                 await asyncio.wait_for(ws.recv(), 10)
-            return True
-        except Exception as e:
-            log(f"stage: in-place refresh of {tid} failed ({e}), opening a new tab")
-            return False
 
-    async def _show_locked(self, mine, owner, url, purpose, dwell):
+    async def peek_tab(self, tid, chars=400):
+        """What tab `tid` shows right now: final URL, title, the start of its visible
+        text, the form fields that hold something (secrets masked), and whether
+        the human is working in it.
+
+        Read only. It evaluates one expression; it never navigates, reloads,
+        focuses or types. Matt's rule, 2026-10-23: look at a page before touching
+        it, because he may already have moved it forward (filled the form, solved
+        the captcha, hit send).
+        """
+        chars = max(0, min(int(chars), 5000))
+        info = {}
+        try:
+            info = (await self.up.send("Target.getTargetInfo", targetId=tid)).get("targetInfo", {})
+        except Exception:
+            pass
+        out = {"target": tid[:12], "url": info.get("url", ""), "title": info.get("title", ""),
+               "text": "", "fields": []}
+        try:
+            v = json.loads(await page_eval(tid, PEEK_JS % chars) or "{}")
+            if isinstance(v, dict):
+                out.update({k: v[k] for k in ("url", "title", "text") if isinstance(v.get(k), str)})
+                if isinstance(v.get("fields"), list):
+                    out["fields"] = v["fields"][:30]
+                HUMANS.merge(tid, v.get("human"))
+        except Exception as e:
+            out["note"] = f"could not read the page ({type(e).__name__})"
+        out["human"] = HUMANS.info(tid)
+        out["human_active_since"] = out["human"]["human_active_since"]
+        return out
+
+    async def peek(self, match, chars=400):
+        """Every open page tab whose job owner, lease owner or target id is `match`,
+        or whose URL contains it. Includes tabs the human opened himself. Changes nothing."""
+        if not match:
+            return []
+        live = await self._live()
+        owners = {}
+        for o, t in self.tabs.items():
+            owners.setdefault(t, []).append(o)
+        lessees = {t: i["owner"] for t, i in (REG.tabs.items() if REG is not None else ())}
+        tids = [t for t, i in live.items()
+                if match in owners.get(t, []) or match == lessees.get(t) or match in i.get("url", "")
+                or (len(match) >= 8 and t.startswith(match))]
+        hits = await asyncio.gather(*(self.peek_tab(tid, chars) for tid in tids))
+        for tid, p in zip(tids, hits):
+            p["shown_by"] = owners.get(tid) or None
+            p["leased_by"] = lessees.get(tid)
+            p["opened_by_broker"] = tid in self.created or tid in lessees
+        return list(hits)
+
+    async def _show_locked(self, mine, owner, url, purpose, dwell, reload=False):
+        # History of this method, because each line of it is a lesson:
+        # 2026-09-16: re-showing a page closes the old tab first, so there is never
+        #   a row of half-stale copies of the same page to pick from.
+        # 2026-10-02: only ever THIS OWNER's tab. One shared stage tab let each
+        #   agent's show close the page another agent had just put up.
+        # 2026-10-22: "refresh the page that is already open, never open new tabs
+        #   of the same thing." Reuse any tab already on the page.
+        # 2026-10-23: "I filled out TruePeopleSearch and hit send ... you didn't
+        #   recognize that on the screen and you're doing it again." Reloading that
+        #   tab wiped his form, his captcha and his success page. Now a job owns one
+        #   tab; showing it again brings it forward AS IS and hands back what it
+        #   shows. It is reloaded only on request, and never while he works in it.
+        key, site = page_key(url), site_of(url)
+        live = await self._live()
+        tid, job = self.tabs.get(owner), self.jobs.get(owner)
+        if tid and tid not in live:                 # he closed it himself: that job is over
+            self.tabs.pop(owner, None)
+            self.jobs.pop(owner, None)
+            self.created.discard(tid)
+            tid = job = None
+        if tid and job and job["site"] != site:
+            # The owner moved on to another site, so the old job is done.
+            await self._end_job(owner, live)
+            tid = job = None
+
+        if tid:                                      # rule 1: this job already has its tab
+            if reload:
+                HUMANS.guard(tid, "reloaded")
+                self._refuse_churn(owner, url)
+                how = "reloaded"
+            elif job and key != job["asked"]:
+                HUMANS.guard(tid, "moved to another page")
+                how = "moved"
+            else:
+                how = "as is"
+        else:
+            self._refuse_churn(owner, url)
+            tid = self._tab_showing(url, live, owner)
+            if tid and reload:
+                HUMANS.guard(tid, "reloaded")
+            how = ("reloaded" if reload else "as is") if tid else "new"
+
         self.holder, self.url, self.purpose = owner, url, purpose
         self.until = time.time() + dwell
-
-        # Matt's rule, 2026-09-16: re-showing a page closes the old tab first, so
-        # there is never a row of half-stale copies of the same page to pick from.
-        # Only ever THIS OWNER's previous stage tab. 2026-10-02: the stage kept one
-        # tab for everybody, so each agent's show closed the page another agent had
-        # just put in front of Matt (page-audit and email-session ate each other's
-        # tabs every few minutes). A tab the human opened is never ours either.
-        # Matt's rule, 2026-10-22: "refresh the page that is already open, never open
-        # new tabs of the same thing." If any tab already shows this page (same URL
-        # minus the #fragment, whoever opened it), reload that tab in place and close
-        # this owner's other stage tab, instead of stacking another copy.
-        same = await self._tab_showing(url)
-        prev = self.tabs.pop(owner, None)
-        if prev and prev != same:
-            self.created.discard(prev)
-            try:
-                await self.up.send("Target.closeTarget", targetId=prev)
-            except Exception:
-                pass
-
-        if same and await self._navigate(same, url):
-            for o, t in list(self.tabs.items()):
-                if t == same:
-                    self.tabs.pop(o, None)
-            self.tabs[owner] = same
-        else:
+        if how == "new":
             res = await self.up.send("Target.createTarget", url=url, background=False)
-            self.tabs[owner] = res["targetId"]
-            self.created.add(res["targetId"])
-        await self._front(self.tabs[owner])
-        log(f"stage -> {owner}: {url} ({purpose or 'no purpose given'}), held {dwell}s")
+            tid = res["targetId"]
+            self.created.add(tid)
+        elif how in ("reloaded", "moved"):
+            await self._navigate(tid, url, reload=(how == "reloaded"))
+            if how == "reloaded":
+                self._note_churn(owner, [key])
+        if REG is not None and tid in REG.tabs:
+            self.created.add(tid)                    # the broker made it, as a hidden lease
+        for o, t in list(self.tabs.items()):
+            if t == tid and o != owner:              # one job per tab
+                self.tabs.pop(o, None)
+                self.jobs.pop(o, None)
+        if self.tabs.get(owner) != tid or owner not in self.jobs:
+            self.jobs[owner] = {"site": site, "asked": key, "keys": set(), "since": time.time()}
+        self.tabs[owner] = tid
+        self.jobs[owner]["asked"] = key
+        self.jobs[owner]["keys"].add(key)
+        HUMANS.watch(tid)
+        await self._front(tid)
+        words = {"new": "new tab", "as is": "already open, brought forward as is",
+                 "reloaded": "reloaded in place (asked for)", "moved": "same job tab, moved to this page"}
+        log(f"stage -> {owner}: {url} ({purpose or 'no purpose given'}), {words[how]}, held {dwell}s")
         asyncio.create_task(self._decay(mine, dwell))
-        return {"shown": url, "target_id": self.tabs[owner], "held_for": dwell, "owner": owner}
+        r = {"shown": url, "target_id": tid, "held_for": dwell, "owner": owner,
+             "already_open": how != "new", "reloaded": how == "reloaded", "moved": how == "moved"}
+        if how == "as is":
+            r["page"] = await self.peek_tab(tid, 200)
+        return r
+
+    async def _end_job(self, owner, live=None):
+        """Finish `owner`'s job: close its tab if the broker opened it. Returns
+        ("closed", info) or ("left", info). A tab the human is working in is never
+        closed: it is handed to him, and the broker forgets it."""
+        tid = self.tabs.pop(owner, None)
+        job = self.jobs.pop(owner, None)
+        if not tid:
+            return None
+        if job:
+            self._note_churn(owner, job["keys"])
+        url = (live or {}).get(tid, {}).get("url", "")
+        if tid not in self.created:
+            return ("left", {"owner": owner, "target": tid[:12], "why": "the human's own tab"})
+        self.created.discard(tid)
+        if REG is not None and REG.tabs.pop(tid, None) is not None:
+            REG._save()
+        if HUMANS.active(tid):
+            HUMANS.forget(tid)
+            log(f"stage tab {tid[:12]} left open for the human ({owner}): he is working in it")
+            return ("left", {"owner": owner, "target": tid[:12],
+                             "why": "the human is working in it, so it is his now"})
+        HUMANS.forget(tid)
+        try:
+            await self.up.send("Target.closeTarget", targetId=tid)
+        except Exception:
+            pass
+        log(f"stage tab {tid[:12]} closed ({owner}, job done)")
+        return ("closed", {"owner": owner, "target": tid[:12], "url": url})
 
     async def unshow(self, match):
-        """Close the stage tab(s) whose owner is `match`, or whose page URL contains it.
+        """Finish the job(s) whose owner is `match`, or whose page URL contains it.
 
         Matt's rule, 2026-10-23: "quit leaving tabs open after you do things." An
         agent that put a page up closes it when the task is done (bb-close). Only
-        tabs the stage itself opened are closed. A tab the human already had open
-        and the stage merely refreshed in place is forgotten, never closed.
+        tabs the broker itself opened are closed. A tab the human already had open,
+        or is working in right now, is left to him.
         """
         if not match:
             return {"closed": [], "left_open": []}
-        try:
-            urls = {t["targetId"]: t.get("url", "") for t in
-                    (await self.up.send("Target.getTargets")).get("targetInfos", [])}
-        except Exception:
-            urls = {}
+        live = await self._live()
         closed, left = [], []
         for o, tid in list(self.tabs.items()):
-            if o != match and match not in urls.get(tid, ""):
+            if o != match and match not in live.get(tid, {}).get("url", ""):
                 continue
-            self.tabs.pop(o, None)
-            if tid not in self.created:
-                left.append({"owner": o, "target": tid[:12], "why": "the human's own tab"})
-                continue
-            self.created.discard(tid)
-            try:
-                await self.up.send("Target.closeTarget", targetId=tid)
-            except Exception:
-                pass
-            closed.append({"owner": o, "target": tid[:12], "url": urls.get(tid, "")})
-            log(f"stage tab {tid[:12]} closed ({o}, unshow)")
+            res = await self._end_job(o, live)
+            if res:
+                (closed if res[0] == "closed" else left).append(res[1])
             if o == self.holder:
                 self.free(self._serial)
         return {"closed": closed, "left_open": left}
@@ -683,6 +1173,13 @@ async def _page_session(client, tid):
                 out["sessionId"] = m["sessionId"]
             await client.send(json.dumps(out))
             return None
+        no = await agent_gate(tid, m.get("method"), m.get("params"))
+        if no:
+            out = {"id": m.get("id"), "error": {"code": -32000, "message": "browser-broker: " + no}}
+            if "sessionId" in m:
+                out["sessionId"] = m["sessionId"]
+            await client.send(json.dumps(out))
+            return None
         return raw
 
     try:
@@ -838,11 +1335,20 @@ async def _browser_session(client):
                 await reply(m, error={"code": -32000, "message": "No target with given id found"})
                 return None
             if method == "Target.closeTarget":
+                no = await agent_gate(tid, method, p)
+                if no:
+                    await reply(m, error={"code": -32000, "message": "browser-broker: " + no})
+                    return None
                 await REG.close(tid, "client closed it")
                 await reply(m, result={"success": True})
                 return None
         if method == "Target.setAutoAttach" and p.get("flatten") is not None:
             pass    # allowed; auto-attach events are filtered below
+        if m.get("sessionId") in sessions:
+            no = await agent_gate(sessions[m["sessionId"]], method, p)
+            if no:
+                await reply(m, error={"code": -32000, "message": "browser-broker: " + no})
+                return None
         return raw
 
     async def u2c(raw):
@@ -936,6 +1442,21 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._reply(200, {"ok": True, "brave": self._run(UP.alive())})
         if self.path.startswith("/stage"):
             return self._reply(200, STAGE.state())
+        if self.path.startswith("/peek"):
+            # Read only: what matching tabs show right now, the human's own included.
+            from urllib.parse import urlsplit, parse_qs
+            q = parse_qs(urlsplit(self.path).query)
+            match = (q.get("match") or [""])[0]
+            if not match:
+                return self._reply(400, {"error": "peek needs ?match=<owner|url-substring>"})
+            try:
+                chars = int((q.get("chars") or ["400"])[0])
+            except ValueError:
+                chars = 400
+            try:
+                return self._reply(200, {"match": match, "tabs": self._run(STAGE.peek(match, chars))})
+            except concurrent.futures.TimeoutError:
+                return self._reply(504, {"error": "browser did not answer in time"})
         self._reply(404, {"error": "no such endpoint"})
 
     def do_POST(self):
@@ -944,14 +1465,23 @@ class ApiHandler(BaseHTTPRequestHandler):
             b = json.loads(self.rfile.read(n) or b"{}")
             if self.path.startswith("/lease"):
                 ttl = int(b.get("ttl", DEFAULT_TTL))
-                tid = self._run(REG.create(b.get("owner", "anonymous"), b.get("url"),
-                                           hidden=bool(b.get("hidden", True)), kind="rest", ttl=ttl))
+                owner = b.get("owner", "anonymous")
+                # Rule 1: a job that is already on screen for this owner and site
+                # is leased as it is. A hidden second copy is what agents used to
+                # fill in while the human was looking at (and typing in) the first.
+                shared = STAGE.job_tab(owner, b["url"]) if b.get("url") else None
+                if shared and shared not in REG.tabs:
+                    tid = self._run(REG.adopt(shared, owner, ttl))
+                else:
+                    shared = None
+                    tid = self._run(REG.create(owner, b.get("url"), hidden=bool(b.get("hidden", True)),
+                                               kind="rest", ttl=ttl))
                 i = REG.tabs[tid]
                 i["attached"] = 1          # a REST lease counts as held from grant
                 i["purpose"] = b.get("purpose")
                 return self._reply(200, {"lease_id": i["lease_id"], "target_id": tid,
                                          "ws_url": f"ws://127.0.0.1:{LISTEN}/devtools/page/{tid}",
-                                         "expires_in": ttl})
+                                         "expires_in": ttl, "shared_with_shown_job": bool(shared)})
             if self.path.startswith("/renew"):
                 # Pool and browser-client tabs carry lease_id None: a body with no
                 # lease_id must not match them.
@@ -967,8 +1497,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                     return self._reply(400, {"error": "lease_id is required"})
                 for tid, i in list(REG.tabs.items()):
                     if i.get("lease_id") == b.get("lease_id"):
-                        self._run(REG.close(tid, "released"))
-                        return self._reply(200, {"released": b["lease_id"]})
+                        closed = self._run(REG.close(tid, "released"))
+                        r = {"released": b["lease_id"], "tab_closed": bool(closed)}
+                        if not closed:
+                            r["left_open"] = ("it is a job tab on screen; bb-close finishes the job"
+                                              if STAGE.job_of(tid) else "the human is working in it")
+                        return self._reply(200, r)
                 return self._reply(404, {"error": "unknown lease"})
             if self.path.startswith("/show"):
                 if not b.get("url"):
@@ -977,10 +1511,21 @@ class ApiHandler(BaseHTTPRequestHandler):
                     wait = STAGE_WAIT if b.get("wait") is None else int(b["wait"])
                     return self._reply(200, self._run(STAGE.show(
                         b.get("owner", "anonymous"), b["url"], b.get("purpose"),
-                        wait, b.get("dwell")), timeout=wait + 15))
+                        wait, b.get("dwell"), bool(b.get("reload"))), timeout=wait + 15))
                 except StageBusy as e:
                     return self._reply(409, {"error": str(e), "held_by": e.holder,
                                              "seconds_left": e.seconds_left, "showing": e.url})
+                except HumanBusy as e:
+                    # Rule 3: hand back what he has done so far, so the agent picks up from there.
+                    page = None
+                    try:
+                        page = self._run(STAGE.peek_tab(e.tid, 400), timeout=10)
+                    except Exception:
+                        pass
+                    return self._reply(423, {"error": str(e), "human_active": True,
+                                             "seconds_ago": round(e.seconds_ago, 1), "page": page})
+                except StopAndAsk as e:
+                    return self._reply(429, {"error": str(e), "stop_and_ask": True})
             if self.path.startswith("/unshow"):
                 match = b.get("match") or b.get("owner") or b.get("url")
                 if not match:
