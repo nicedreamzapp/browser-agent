@@ -29,6 +29,13 @@ rule, so the next agent doesn't pay for the same lesson.
   disappears. Type paragraphs with `Input.insertText` plus two Enter keys between them.
   Filling the editor with `\n\n` renders as huge gaps.
 
+- **X (Twitter) composer:** Draft.js ignores `Input.insertText` AND `document.execCommand`
+  in a background tab, so the composer stays empty. Show the composer as a visible tab
+  (`bb-show https://x.com/compose/post`, ideally on a machine nobody is using), then type
+  with `Input.insertText`, attach with `DOM.setFileInputFiles` on
+  `input[data-testid="fileInput"]`, and click `tweetButton`. Check the attachment `img`
+  appears before you post.
+
 ## Privacy opt-out forms
 
 - **Same-vendor families:** TruePeopleSearch, CyberBackgroundChecks,
