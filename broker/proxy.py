@@ -553,7 +553,10 @@ async def agent_gate(tid, method, params):
     Called for every command an agent sends through the proxy to a tab."""
     if not method:
         return None
-    if method.startswith("Input."):
+    # DOM.setFileInputFiles fires trusted input/change events on the file field, so it
+    # counts as the agent's own input too (2026-10-23: a LinkedIn image upload in a
+    # hidden tab read as "the human is working here" and blocked the agent's next click).
+    if method.startswith("Input.") or method == "DOM.setFileInputFiles":
         if HUMANS.active(tid):
             return str(HumanBusy(tid, HUMANS.seconds_ago(tid), "typed or clicked in"))
         HUMANS.agent_input(tid)

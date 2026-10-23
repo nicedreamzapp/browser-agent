@@ -406,3 +406,12 @@ def test_page_key_and_site(stack):
     assert p.page_key("https://a.example/x/#top") == "https://a.example/x"
     assert p.site_of("https://www.Shop.example/a") == "shop.example"
     assert p.site_of("about:blank") == "about:blank"
+
+
+def test_file_upload_is_the_agents_own_input(monkeypatch):
+    import asyncio, proxy
+    monkeypatch.setattr(proxy, "HUMANS", proxy.Humans())
+    assert asyncio.run(proxy.agent_gate("T", "DOM.setFileInputFiles", {})) is None
+    now = time.time()
+    assert proxy.HUMANS.note("T", now + 0.3, "change") is False   # the upload's own change event
+    assert proxy.HUMANS.note("T", now + 0.4, "input") is False
