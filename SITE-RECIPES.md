@@ -110,3 +110,16 @@ rule, so the next agent doesn't pay for the same lesson.
 - **Signing over SSH on the mini fails** with `errSecInternalComponent` (locked login
   keychain). Let automatic signing there register the bundle ID and capability, then
   sign on a Mac with an unlocked keychain using a manual profile made through the ASC API.
+
+## Google Play Console
+
+- **Replying to a review (verified 2026-10-23, hidden lease works):** the Play service
+  account is read-only for replies, so use the logged-in browser. A cold
+  `/console/u/0/developers` shows an account picker (`material-select-item`, click it).
+  Reviews live at `/console/u/0/developers/<devId>/app/<appId>/user-feedback/reviews`.
+  Each `<review>` element (author in `.author-display-name`) has an always-open textarea
+  in `<review-reply>` (350-char limit). Set it with the native `HTMLTextAreaElement` value
+  setter plus `input`/`change` events; the counter updates. The **Publish reply** and
+  Discard buttons only render after the textarea gets focus: call `ta.focus()`, dispatch
+  `focus` + bubbling `focusin`, and `ta.click()`, then `button.click()` on "Publish reply".
+  Success: the block shows "Edit reply" with the text; reload and read it back to confirm.
