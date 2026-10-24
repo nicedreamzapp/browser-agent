@@ -98,3 +98,8 @@ rule, so the next agent doesn't pay for the same lesson.
 - **DTS code-level request** (`developer.apple.com/contact/request/code-level-support/`):
   it requires Steps to Reproduce, the Xcode and macOS versions, and a runtime platform
   plus version. Get those approved along with the description before you start.
+- **DTS needs a test project:** answering "No, I don't have a project" hides the whole
+  request section and the Submit button. The section shows for a moment if you fill
+  fast, but it's gone a few seconds later and the hidden fields read `null`. A DTS
+  request requires answering Yes (the project goes in a reply to the acknowledgement
+  email). Without a project, the request belongs on the Developer Forums.
