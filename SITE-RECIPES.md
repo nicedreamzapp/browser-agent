@@ -76,3 +76,12 @@ rule, so the next agent doesn't pay for the same lesson.
   robot phone call reads you a code. A human has to answer the call.
 - **Captchas are the human's job.** Fill everything, verify it stuck, then hand over
   with one line: "do the robot check and click X".
+
+## Apple developer sites
+
+- **Feedback Assistant / developer.apple.com:** when the session is cold, a hidden tab
+  lands on `idmsa.apple.com/IDMSWebAuth/signin` with the form inside a cross-origin
+  iframe, so `document.body.innerText` reads empty. Treat an empty body on idmsa as
+  "signed out": stop and ask, never sign in. If the person signs in while the tab is
+  open, the broker marks it as his and `/release` leaves it open; the session cookie
+  then carries to new tabs, so re-run from a fresh lease only after he says go.
