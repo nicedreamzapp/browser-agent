@@ -102,4 +102,11 @@ rule, so the next agent doesn't pay for the same lesson.
   request section and the Submit button. The section shows for a moment if you fill
   fast, but it's gone a few seconds later and the hidden fields read `null`. A DTS
   request requires answering Yes (the project goes in a reply to the acknowledgement
-  email). Without a project, the request belongs on the Developer Forums.
+  email). Without a project, the request belongs on the Developer Forums. Answering Yes
+  and then "Problems with an Apple framework API" brings back the request fields. There's
+  no upload field. The page only says "Your request has been sent", and the Case-ID
+  arrives within about a minute in an email from dts-help@apple.com. Reply in that
+  thread with the zipped project (max 50 MB, about 250 source lines).
+- **Signing over SSH on the mini fails** with `errSecInternalComponent` (locked login
+  keychain). Let automatic signing there register the bundle ID and capability, then
+  sign on a Mac with an unlocked keychain using a manual profile made through the ASC API.
