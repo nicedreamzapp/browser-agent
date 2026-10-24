@@ -85,3 +85,16 @@ rule, so the next agent doesn't pay for the same lesson.
   "signed out": stop and ask, never sign in. If the person signs in while the tab is
   open, the broker marks it as his and `/release` leaves it open; the session cookie
   then carries to new tabs, so re-run from a fresh lease only after he says go.
+- **Feedback Assistant form (signed in, hidden tab works):** `/new` lists areas as
+  buttons, and clicking one creates a draft right away. Delete any draft you open by
+  mistake. API and entitlement reports go under "Developer Technologies & SDKs", which
+  has platform, technology (e.g. App Intents Framework) and type selects. Setting the
+  values natively and firing `input`/`change` sticks. Submit opens a "Missing Files"
+  modal; "Submit Without Files" files it, and the URL becomes `/feedback/<FB number>`.
+- **Native confirm dialogs freeze `Runtime.evaluate`** (the Feedback Assistant draft
+  Delete, for example). Click from a `setTimeout`, then wait for
+  `Page.javascriptDialogOpening` on a session that already ran `Page.enable`, and answer
+  it with `Page.handleJavaScriptDialog`.
+- **DTS code-level request** (`developer.apple.com/contact/request/code-level-support/`):
+  it requires Steps to Reproduce, the Xcode and macOS versions, and a runtime platform
+  plus version. Get those approved along with the description before you start.
