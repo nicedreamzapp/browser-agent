@@ -29,6 +29,20 @@ rule, so the next agent doesn't pay for the same lesson.
   disappears. Type paragraphs with `Input.insertText` plus two Enter keys between them.
   Filling the editor with `\n\n` renders as huge gaps.
 
+- **LinkedIn composer from a hidden lease (verified 2026-10-23, new TipTap/ProseMirror
+  editor):** open it by URL, `https://www.linkedin.com/feed/?shareActive=true`. Mouse
+  clicks and Enter key events did nothing there. Buttons: `Runtime.evaluate` with
+  `userGesture: true` and `button.click()` ("Media", "Upload from computer", "Next", "Post").
+  Text: `editor.focus()`, select its contents with a DOM Range, `Input.insertText` per
+  line, and for each line break dispatch a synthetic
+  `KeyboardEvent('keydown', {key:'Enter', bubbles:true})` on the editor (blank line = two).
+  Read back exactly with `[...editor.children].map(p => p.textContent).join("\n")`.
+  Image: `Page.setInterceptFileChooserDialog` never fired; patch
+  `HTMLInputElement.prototype.click`/`showPicker` to stash the file input in `window.__fi`,
+  click "Upload from computer", then `DOM.setFileInputFiles` on that objectId, then "Next".
+  In this editor, text first then image worked fine (the links did not hide Media).
+  After Post, the toast's "View post" link holds `/feed/update/urn:li:share:<id>/`.
+
 - **X (Twitter) composer:** Draft.js ignores `Input.insertText` AND `document.execCommand`
   in a background tab, so the composer stays empty. Show the composer as a visible tab
   (`bb-show https://x.com/compose/post`, ideally on a machine nobody is using), then type
