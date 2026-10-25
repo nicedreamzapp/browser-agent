@@ -22,7 +22,8 @@ sleep 3
 open -a "$APP" --args \
   "--remote-debugging-port=$PORT" "--remote-allow-origins=*" --restore-last-session \
   --disable-backgrounding-occluded-windows --disable-renderer-backgrounding \
-  --disable-background-timer-throttling
+  --disable-background-timer-throttling \
+  --autoplay-policy=no-user-gesture-required
 sleep 6
 curl -sf -m 3 "http://127.0.0.1:$PORT/json/version" >/dev/null && echo "browser up with CDP on $PORT" \
   || { echo "browser did not come up on $PORT" >&2; exit 1; }
