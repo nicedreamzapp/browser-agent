@@ -201,3 +201,16 @@ Rules for the list:
   row at `/~` (a data-method POST link, `/~/subscribe?id=16`). The form is URL, Title,
   and "What's interesting about it?" (Markdown, no length limit); `form.requestSubmit()`
   works, and success redirects home with "We received your submission!".
+
+## Application forms (Microsoft Forms and similar)
+
+- **Read the whole form before filling anything (verified 2026-10-25).** Microsoft Forms
+  short links (`forms.office.com/r/<id>`) open in a hidden lease with no sign-in and the
+  full question list is in `document.body.innerText`. Dump it first and check every
+  question against the approved answers; if one needs a fact or a judgment call nobody
+  approved (funding history, team, personal details), stop and ask before typing, so a
+  half-filled form is never left behind.
+- **Multi-step jobs need one lease held open.** Each `with lease(...)` releases on exit,
+  and reopening the same site with the same owner is refused after two tries. For a job
+  with many steps, run one small holder process that keeps the lease and takes commands
+  over a localhost port, then shut it down when the job ends.
