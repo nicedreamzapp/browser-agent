@@ -19,7 +19,7 @@ It is a thin layer on top of other people's work.
 | Chrome and Brave | The browsers being shared | The Chromium team, Brave Software |
 | [websockets](https://github.com/python-websockets/websockets) | The async websocket client and server inside `proxy.py` | Aymeric Augustin and contributors |
 | [websocket-client](https://github.com/websocket-client/websocket-client) | The CDP socket in `broker_client.py` and `broker.py` | Hiroki Ohtani and contributors |
-| [Claude Code](https://claude.ai/code) | The `PreToolUse` hook mechanism the focus-guard example plugs into; several commits were co-authored with it | Anthropic |
+| [Claude Code](https://claude.ai/code) | The `PreToolUse` hook mechanism the focus-guard example plugs into | Anthropic |
 | [MkDocs](https://www.mkdocs.org/) and [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/) | This documentation site | Tom Christie and contributors; Martin Donath and contributors |
 
 ## Field reports
