@@ -92,6 +92,13 @@ Rules for the list:
   `input[data-testid="fileInput"]`, and click `tweetButton`. Check the attachment `img`
   appears before you post.
 
+- **X text posts and replies, no typing (2026-10-25):** skip the composer entirely. In a hidden
+  lease, call `Emulation.setFocusEmulationEnabled` (enabled: true), then open
+  `https://x.com/intent/post?in_reply_to=<status id>&text=<url-encoded text>` (drop
+  `in_reply_to` for a new post). X fills the composer itself, so Draft.js never sees a
+  keystroke. Read the textarea back, check `tweetButton` is enabled, click it, then confirm
+  the post on `/<handle>/with_replies`. Images still need the visible composer above.
+
 - **Reddit comments:** skip the composer. In a logged-in tab (a background tab is fine),
   read `modhash` from `/api/me.json`, then POST `/api/comment` (`api_type=json`,
   `thing_id=t3_<id>`, `text`) with the `X-Modhash` header. Confirm it worked by reading
