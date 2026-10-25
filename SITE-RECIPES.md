@@ -221,3 +221,24 @@ Rules for the list:
   it). Radios and the agree box are `input[type=radio]`, so `.click()` them. Read every
   field back, then `.click()` the Submit button; the page swaps in place to the form's
   thank-you text (the URL stays the same).
+
+## OAuth popups and custom form widgets
+
+- **An OAuth popup is reachable from the lease that opened it (verified 2026-10-25,
+  claude.com Claude for Open Source form).** `window.open` from a leased tab makes a new
+  page target with `openerId` set to your tab. `Target.getTargets` on your own session
+  lists it, but the broker refuses a direct `/devtools/page/<id>` socket to it. Drive it
+  without leaving the broker: `Target.attachToTarget` (flatten: false), then
+  `Target.sendMessageToTarget` with `Emulation.setFocusEmulationEnabled` and, a few
+  seconds later, a `Runtime.evaluate` (`userGesture: true`) that clicks the GitHub
+  "Authorize" button. Replies come back as events, so confirm by watching the popup
+  vanish from `Target.getTargets` and the opener page change.
+- **A required field you can't see means a widget still wants a click.** HubSpot forms
+  with a custom "connect" block keep required inputs hidden (`github_profile`,
+  `repository_url`) until the widget finishes. Submit then fails silently, with no error
+  text, because the browser can't focus the hidden invalid fields. Run
+  `form.checkValidity()` and list `[...form.elements].filter(e => !e.checkValidity())`
+  before you submit. On claude.com, picking the repo in the `<select>` wasn't enough;
+  the "Use this repository" button is what filled the hidden fields and the verification
+  token. Run IIFEs in repeated `Runtime.evaluate` calls: a top-level `const` from an
+  earlier call throws on redeclaration and returns nothing.
