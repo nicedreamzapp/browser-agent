@@ -21,6 +21,48 @@ rule, so the next agent doesn't pay for the same lesson.
   (fixed 2026-10-23).
 - **Compare text ignoring whitespace.** Rich editors (Quill and similar) drop paragraph
   breaks from `innerText`, so a strict comparison fails on correct text.
+- **A tab waiting on the human is his until he says done.** Authorize, login, captcha
+  and "copy this code" pages stay open until he says he's finished and the result is
+  verified. "Close tabs when done" means when *his* part is done, not the agent's step.
+  On a timeout, extend the wait; never close and reopen the page (2026-10-24: an
+  authorize tab was closed three times while he was on it).
+- **Close and navigate only through the broker (`bb-close`).** Raw CDP calls
+  (`/json/close/<id>`, `Target.closeTarget`, `Page.navigate` on the real browser port)
+  skip the broker's human-is-working check and will close a tab out from under him.
+  If a page looks stale, ask before closing it.
+- **Never poll the broker's `/json` endpoints in a loop.** On the broker's proxy port,
+  each `/json/list` call can create a hidden pool tab; a once-a-second watcher flooded
+  the browser with about 30 blank tabs (2026-10-24). Use `bb-peek` or the broker's
+  `/status` instead.
+
+## Reading a site: first choice, then fallback
+
+Sites change and tools break; that is normal, not an emergency. So every read gets an
+ordered list of methods, tried in turn until one works. When a method breaks, move it
+down the list or swap it out; the caller's command never changes. (Pattern borrowed from
+[Agent-Reach](https://github.com/Panniantong/Agent-Reach).)
+
+The default order, cheapest and sturdiest first:
+
+1. **The site's own API or a local CLI** (`gh` for GitHub, WP-CLI/REST for WordPress,
+   `yt-dlp` for video info and subtitles). No tab, no rendering.
+2. **`fetch()` inside a logged-in tab.** Run it in the page's JavaScript context so it
+   carries the session cookies, against the same JSON endpoints the site's own UI calls.
+   Structured data, no DOM parsing.
+3. **Read the rendered DOM** in a hidden broker lease. Slowest and most fragile; it
+   breaks when the markup changes.
+4. **Show the page to the human** only when everything above failed, and say which steps
+   were tried.
+
+Rules for the list:
+
+- **Record the order per site** in that site's section of this file, with the date each
+  method was last seen working. A method that failed twice in a row moves down.
+- **Fall through on a real failure only:** an error, an empty result, a login wall. A
+  slow answer is not a failure.
+- **Report which method answered,** so a silent fallback can't hide a broken first choice.
+- **Our own stack only.** No outside paid readers or proxies (Jina, Exa, scraping
+  services) in the list; if a site needs one, write down why and how we would replace it.
 
 ## Posting
 

@@ -10,6 +10,7 @@ None of this starts from scratch. Here's whose work this is built on.
 | 🤖 [claude-code-local](https://github.com/nicedreamzapp/claude-code-local) | The MLX inference server it talks to | sibling project |
 | 🔌 [websockets](https://github.com/python-websockets/websockets) | The agent's CDP socket, and the broker's proxy | Aymeric Augustin and contributors |
 | 🔌 [websocket-client](https://github.com/websocket-client/websocket-client) | The broker's lease client | Hiroki Ohtani and contributors |
+| 👁️ [Agent-Reach](https://github.com/Panniantong/Agent-Reach) | The "first choice, then fallback" order for reading a site (SITE-RECIPES.md) | Panniantong |
 
 ## Field reports
 
