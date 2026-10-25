@@ -98,6 +98,9 @@ Rules for the list:
   `in_reply_to` for a new post). X fills the composer itself, so Draft.js never sees a
   keystroke. Read the textarea back, check `tweetButton` is enabled, click it, then confirm
   the post on `/<handle>/with_replies`. Images still need the visible composer above.
+  The profile timeline can lag several minutes after a post, so it is NOT proof of failure. Confirm with
+  `x.com/search?q=from%3A<handle>%20%22<phrase>%22&f=live` instead. If you retry anyway, a CreateTweet
+  reply with error 187 "Status is a duplicate" means the first try already posted (2026-10-25).
 
 - **Reddit comments:** skip the composer. In a logged-in tab (a background tab is fine),
   read `modhash` from `/api/me.json`, then POST `/api/comment` (`api_type=json`,
