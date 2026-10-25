@@ -172,3 +172,15 @@ Rules for the list:
   Discard buttons only render after the textarea gets focus: call `ta.focus()`, dispatch
   `focus` + bubbling `focusin`, and `ta.click()`, then `button.click()` on "Publish reply".
   Success: the block shows "Edit reply" with the text; reload and read it back to confirm.
+
+## Chat assistants (Grok, ChatGPT, Gemini, DeepSeek)
+
+- **One tab per job, reused across steps:** to post into a chat the human already has open
+  (Grok, ChatGPT, etc.), don't open a fresh lease copy for every retry. Keep one lease open
+  across type → submit → read-back, and debug inside it. On 10/25 a sender opened the same
+  Grok conversation 5 times in 3 minutes (3 visible), and its scripted typing was mistaken
+  for human input.
+- **Submitting:** `form.requestSubmit()` worked in a hidden tab for Grok and ChatGPT where
+  an Enter keypress and a mouse press at the button's coordinates did nothing. Gemini
+  needed a dispatched click on its Send button. DeepSeek's send is the empty-text
+  `div.ds-button--primary`.

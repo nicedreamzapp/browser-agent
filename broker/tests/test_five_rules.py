@@ -415,3 +415,89 @@ def test_file_upload_is_the_agents_own_input(monkeypatch):
     now = time.time()
     assert proxy.HUMANS.note("T", now + 0.3, "change") is False   # the upload's own change event
     assert proxy.HUMANS.note("T", now + 0.4, "input") is False
+
+
+# ===============================================================================
+# 2026-10-25: the agent's scripted typing is not him, and a tab he touched is his
+# ===============================================================================
+def test_agent_script_typing_echo_is_not_mistaken_for_him(stack):
+    # An agent types with Runtime.evaluate (focus + execCommand insertText) and clicks
+    # send with a dispatched event. Chrome fires trusted input/change for that.
+    _, l = lease(stack, owner="ask", url="https://chat.example/")
+    tid = l["target_id"]
+    watched(stack, tid)
+    c = stack.page_client(tid)
+    assert "result" in c.call("DOM.focus", nodeId=1)
+    assert "result" in c.call("Runtime.evaluate",
+                              expression="document.execCommand('insertText', false, 'hi')")
+    assert "result" in c.call("Runtime.callFunctionOn", functionDeclaration="function(){}")
+    for kind in ("input", "change"):
+        stack.run(stack.fake.human(tid, kind))
+    time.sleep(0.2)
+    assert stack.proxy.HUMANS.info(tid)["inputs"] == 0
+    code, r = release(stack, l["lease_id"])
+    assert r["tab_closed"] is True and tid not in stack.fake.targets
+
+
+def test_a_late_change_after_agent_typing_with_no_key_or_click_is_the_agents(monkeypatch):
+    import proxy
+    h = proxy.Humans()
+    now = time.time()
+    h.agent_input("T", now)                                        # Input.insertText
+    assert h.note("T", now + 8, "change") is False                 # blur long after: still the agent's
+    h.agent_touch("T", now + 10)                                   # a Runtime.evaluate
+    assert h.note("T", now + 25, "input") is False
+    assert h.note("T", now + 10 + proxy.AGENT_ACTIVE + 5, "input") is True   # agent long gone: him (dictation)
+
+
+def test_his_real_click_still_counts_mid_agent_work(monkeypatch):
+    import proxy
+    h = proxy.Humans()
+    now = time.time()
+    h.agent_touch("T", now)
+    assert h.note("T", now + 0.1, "pointerdown") is True           # scripts never mask a real click
+    assert h.note("T", now + 0.6, "keydown") is True
+    assert h.note("T", now + 0.7, "input") is True                 # he typed after the agent: his input counts
+    assert h.note("T", now + 3, "change") is True
+
+
+def test_releasing_27s_after_his_click_leaves_the_tab_open(stack):
+    _, l = lease(stack, owner="cc", url="https://a.example/")
+    tid = l["target_id"]
+    stack.reg.tabs[tid]["created"] -= 60                           # the lease began a minute ago
+    human_types(stack, tid, kind="pointerdown", ago=27)            # he clicked 27s ago
+    assert stack.proxy.HUMANS.active(tid) is False                 # past HUMAN_QUIET
+    code, r = release(stack, l["lease_id"])
+    assert r["tab_closed"] is False and tid in stack.fake.targets and tid not in stack.reg.tabs
+
+
+def test_lease_expiry_after_his_click_leaves_the_tab_open(stack):
+    _, l = lease(stack, owner="cc", url="https://a.example/", ttl=60)
+    tid = l["target_id"]
+    stack.reg.tabs[tid]["created"] -= 60                           # the lease began a minute ago
+    human_types(stack, tid, kind="pointerdown", ago=40)            # he clicked 40s ago
+    stack.reg.tabs[tid]["expires"] = time.time() - 1
+    stack.run(stack.reg.reap())
+    assert tid in stack.fake.targets and tid not in stack.reg.tabs
+
+
+def test_a_hidden_lease_on_screen_at_release_is_left_open(stack):
+    _, l = lease(stack, owner="cc", url="https://a.example/")      # hidden by default
+    tid = l["target_id"]
+    stack.fake.visible.add(tid)                                    # he switched to it
+    code, r = release(stack, l["lease_id"])
+    assert r["tab_closed"] is False and tid in stack.fake.targets
+
+
+def test_a_hidden_lease_off_screen_with_no_input_still_closes(stack):
+    _, l = lease(stack, owner="cc", url="https://a.example/")
+    code, r = release(stack, l["lease_id"])
+    assert r["tab_closed"] is True and l["target_id"] not in stack.fake.targets
+
+
+def test_a_visible_by_design_lease_with_no_input_still_closes(stack):
+    _, l = lease(stack, owner="cc", url="https://a.example/", hidden=False)
+    tid = l["target_id"]
+    stack.fake.visible.add(tid)
+    code, r = release(stack, l["lease_id"])
+    assert r["tab_closed"] is True and tid not in stack.fake.targets

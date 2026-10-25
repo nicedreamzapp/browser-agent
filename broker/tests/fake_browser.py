@@ -47,6 +47,7 @@ class FakeBrowser:
         self.page_fields = {}        # targetId -> [{"field", "value"}] a peek should read back
         self.page_events = {}        # targetId -> [[t, kind]] the in-page listener has recorded
         self.watchers = {}           # targetId -> [page sockets that added the broker's binding]
+        self.visible = set()         # targetIds whose document.visibilityState reads "visible"
 
     # ---- test helpers ----------------------------------------------------
     def add_human_tab(self, url="https://mail.example.com/inbox", title="Inbox"):
@@ -134,7 +135,11 @@ class FakeBrowser:
         expr = (m.get("params") or {}).get("expression", "")
         if m.get("method") == "Page.navigate" and tid in self.targets:
             self.targets[tid]["url"] = (m.get("params") or {}).get("url", "")
-        if m.get("method") == "Runtime.evaluate" and "innerText" in expr and tid in self.targets:
+        if m.get("method") == "Runtime.evaluate" and "visibilityState" in expr and tid in self.targets:
+            result = {"result": {"type": "string", "value": json.dumps(
+                {"visibility": "visible" if tid in self.visible else "hidden",
+                 "human": self.page_events.get(tid, [])})}}
+        elif m.get("method") == "Runtime.evaluate" and "innerText" in expr and tid in self.targets:
             t = self.targets[tid]
             cut = re.search(r"const n = (\d+);", expr)
             text = self.page_text.get(tid, "")[:int(cut.group(1)) if cut else None]

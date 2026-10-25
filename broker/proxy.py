@@ -82,6 +82,14 @@ STAGE_ACTIVATE_APP = os.environ.get("BROKER_STAGE_ACTIVATE_APP", "1") != "0"
 # The five rules (2026-10-23). See "When the human helps" in the README.
 HUMAN_QUIET = int(os.environ.get("BROKER_HUMAN_QUIET", 20))     # seconds his last input protects a tab
 AGENT_ECHO = 1.5                   # trusted events this soon after an agent's own CDP input are the agent's
+# 2026-10-25: an agent's scripted typing (Runtime.evaluate with focus(), execCommand
+# insertText, value setters) fires trusted input/change events, and a textarea's
+# change can come seconds later when focus moves. input/change this long after an
+# agent's last command in a tab, with no real key, click or paste from him since,
+# are the agent's. Kept narrow: Mac dictation types with input events and no keydown.
+AGENT_ACTIVE = int(os.environ.get("BROKER_AGENT_ACTIVE", 30))
+AGENT_TOUCH = ("Runtime.evaluate", "Runtime.callFunctionOn", "DOM.focus")   # recorded, never blocked
+GENUINE = ("pointerdown", "keydown", "paste")   # inputs only a person makes; they always count
 CHURN_WINDOW = int(os.environ.get("BROKER_CHURN_WINDOW", 600))  # seconds an open/close cycle is remembered
 CHURN_LIMIT = int(os.environ.get("BROKER_CHURN_LIMIT", 2))      # cycles allowed before "stop and ask"
 PORT_GRACE = 8                     # seconds a restarting proxy waits for the old one to let go
@@ -281,10 +289,10 @@ class Registry:
             log(f"tab {tid[:12]} lease ended ({info['owner']}, {why or 'released'}); kept open, "
                 f"it is the shown job tab of {STAGE.job_of(tid)}")
             return False
-        if HUMANS.active(tid):
+        his = await self._his_now(tid, info)
+        if his:
             HUMANS.forget(tid)
-            log(f"tab {tid[:12]} left open for the human ({info['owner']}, {why or 'released'}): "
-                f"he is working in it")
+            log(f"tab {tid[:12]} left open for the human ({info['owner']}, {why or 'released'}): {his}")
             return False
         HUMANS.forget(tid)
         try:
@@ -293,6 +301,31 @@ class Registry:
             pass
         log(f"tab {tid[:12]} closed ({info['owner']}{', ' + why if why else ''})")
         return True
+
+    async def _his_now(self, tid, info):
+        """Why tab `tid` now belongs to the human, or None if the broker may close it.
+
+        2026-10-25: a hidden lease tab came forward when an agent closed the tab in
+        front of it, he clicked in it, and 27s later (past HUMAN_QUIET) the lease
+        released and the tab vanished under him. So: any real input from him since
+        the lease began makes it his, and so does a hidden lease that is on screen
+        now (he switched to it). Visible-by-design leases close as before."""
+        if HUMANS.active(tid):
+            return "he is working in it"
+        try:
+            v = json.loads(await asyncio.wait_for(page_eval(tid, CLOSE_CHECK_JS, 2), 3) or "{}")
+        except Exception:
+            v = {}
+        if not isinstance(v, dict):
+            v = {}
+        HUMANS.merge(tid, v.get("human"))
+        if HUMANS.active(tid):
+            return "he is working in it"
+        if HUMANS.touched_since(tid, info.get("created", 0)):
+            return "he worked in it during the lease"
+        if info.get("hidden") and v.get("visibility") == "visible":
+            return "it was opened hidden and he switched to it"
+        return None
 
     async def release_owner(self, owner, why="client disconnected"):
         for tid in self.owned_by(owner):
@@ -376,6 +409,10 @@ HUMAN_JS = r"""(() => {
   return 'installed';
 })()"""
 
+# Read at release time: is this tab the one on screen, and what did the page record?
+CLOSE_CHECK_JS = r"""JSON.stringify({visibility: document.visibilityState,
+  human: (window.__bbHuman && window.__bbHuman.events) || []})"""
+
 
 def page_key(url):
     """What "the same page" means everywhere here: the URL without its #fragment or trailing slash."""
@@ -425,20 +462,37 @@ class Humans:
     def __init__(self):
         self.events = {}     # tid -> [(epoch seconds, kind)], oldest first
         self.agent = {}      # tid -> [epoch seconds an agent sent CDP input]
+        self.touch = {}      # tid -> [epoch seconds of any agent command that can type (input or scripts)]
         self.tasks = {}      # tid -> the watcher task holding the listener in place
 
     # ---- what happened -------------------------------------------------------
     def agent_input(self, tid, t=None):
+        t = time.time() if t is None else t
         a = self.agent.setdefault(tid, [])
+        a.append(t)
+        del a[:-200]
+        self.agent_touch(tid, t)
+
+    def agent_touch(self, tid, t=None):
+        """An agent ran a script, focused or typed in `tid`: its input/change echoes are masked."""
+        a = self.touch.setdefault(tid, [])
         a.append(time.time() if t is None else t)
+        a.sort()
         del a[:-200]
 
-    def _is_echo(self, tid, t):
-        return any(a - 0.25 <= t <= a + AGENT_ECHO for a in self.agent.get(tid, ()))
+    def _is_echo(self, tid, t, kind=""):
+        if any(a - 0.25 <= t <= a + AGENT_ECHO for a in self.agent.get(tid, ())):
+            return True
+        if kind not in ("input", "change"):
+            return False             # his keys, clicks and pastes always count
+        last = max((a for a in self.touch.get(tid, ()) if a - 0.25 <= t), default=None)
+        if last is None or t - last > AGENT_ACTIVE:
+            return False
+        return not any(last < e <= t and k in GENUINE for e, k in self.events.get(tid, ()))
 
     def note(self, tid, t, kind):
         """Record one trusted input event. False when it was really the agent's own input."""
-        if self._is_echo(tid, t):
+        if self._is_echo(tid, t, kind):
             return False
         ev = self.events.setdefault(tid, [])
         if (t, kind) in ev:
@@ -468,6 +522,10 @@ class Humans:
     def active(self, tid, now=None):
         ago = self.seconds_ago(tid, now)
         return ago is not None and ago < HUMAN_QUIET
+
+    def touched_since(self, tid, t0):
+        """Did he give this tab any real input at or after `t0`?"""
+        return any(t >= t0 for t, _ in self.events.get(tid, ()))
 
     def since(self, tid):
         """Start of his current stretch of work in this tab (inputs less than HUMAN_QUIET apart)."""
@@ -511,6 +569,7 @@ class Humans:
             task.cancel()
         self.events.pop(tid, None)
         self.agent.pop(tid, None)
+        self.touch.pop(tid, None)
 
     async def _watch(self, tid):
         me = asyncio.current_task()
@@ -560,6 +619,10 @@ async def agent_gate(tid, method, params):
         if HUMANS.active(tid):
             return str(HumanBusy(tid, HUMANS.seconds_ago(tid), "typed or clicked in"))
         HUMANS.agent_input(tid)
+        return None
+    if method in AGENT_TOUCH:
+        if tid:
+            HUMANS.agent_touch(tid)  # reads must keep working while he is active: record only
         return None
     if method in ("Page.reload", "Page.navigate", "Target.closeTarget"):
         verb = {"Page.reload": "reloaded", "Page.navigate": "navigated", "Target.closeTarget": "closed"}[method]
