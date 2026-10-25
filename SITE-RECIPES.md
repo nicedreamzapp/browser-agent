@@ -184,3 +184,20 @@ Rules for the list:
   an Enter keypress and a mouse press at the button's coordinates did nothing. Gemini
   needed a dispatched click on its Send button. DeepSeek's send is the empty-text
   `div.ds-button--primary`.
+
+## OAuth sign-in and news submission sites
+
+- **GitHub "Authorize" button stays disabled in a hidden tab.** GitHub's OAuth page keeps
+  the Authorize button disabled until the page looks visible (anti-clickjacking). In the
+  same CDP session, call `Emulation.setFocusEmulationEnabled` (enabled: true), wait a
+  couple of seconds, then `button.click()`; it enables and the redirect completes
+  (verified 2026-10-25).
+- **Changelog News (`changelog.com/news/submit`, verified 2026-10-25):** sign-in is
+  "via GitHub" (`/auth/github`) or an email magic link. A first GitHub sign-in lands on
+  `/join` with name and handle prefilled; it needs an email, and its Turnstile token was
+  already filled in the hidden tab. Joining sends a confirmation link (`/in/<hex>`) that
+  must be opened before you are signed in. Only Changelog News newsletter subscribers can
+  submit: the form bounces to "You must subscribe" until you click Subscribe on the News
+  row at `/~` (a data-method POST link, `/~/subscribe?id=16`). The form is URL, Title,
+  and "What's interesting about it?" (Markdown, no length limit); `form.requestSubmit()`
+  works, and success redirects home with "We received your submission!".
