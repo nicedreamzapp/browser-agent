@@ -10,6 +10,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/nicedreamzapp/browser-agent?style=for-the-badge&logo=github&color=f5c542&labelColor=1f2328)](https://github.com/nicedreamzapp/browser-agent/stargazers)
 [![agent tests](https://img.shields.io/github/actions/workflow/status/nicedreamzapp/browser-agent/agent-tests.yml?branch=main&style=for-the-badge&label=agent%20tests)](https://github.com/nicedreamzapp/browser-agent/actions/workflows/agent-tests.yml)
 [![broker tests](https://img.shields.io/github/actions/workflow/status/nicedreamzapp/browser-agent/broker-tests.yml?branch=main&style=for-the-badge&label=broker%20tests)](https://github.com/nicedreamzapp/browser-agent/actions/workflows/broker-tests.yml)
+[![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/nicedreamzapp/browser-agent?label=OpenSSF%20Scorecard&style=for-the-badge)](https://scorecard.dev/viewer/?uri=github.com/nicedreamzapp/browser-agent)
 [![License: MIT](https://img.shields.io/badge/license-MIT-6366f1.svg?style=for-the-badge)](LICENSE)
 [![Join the NiceDreamzApps Discord](https://img.shields.io/discord/1497121921580404818?label=NiceDreamzApps&logo=discord&color=5865F2&style=for-the-badge)](https://discord.gg/ZdSqgAxUW)
 
