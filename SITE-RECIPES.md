@@ -214,3 +214,10 @@ Rules for the list:
   and reopening the same site with the same owner is refused after two tries. For a job
   with many steps, run one small holder process that keeps the lease and takes commands
   over a localhost port, then shut it down when the job ends.
+- **Microsoft Forms filling (verified 2026-10-25, hidden lease):** each question is a
+  `[data-automation-id=questionItem]`. Single-line inputs have NO `type` attribute, so
+  `input[type=text]` matches nothing; select `textarea, input:not([type=radio])`. The
+  native value setter plus bubbling `input`/`change` events sticks (React state takes
+  it). Radios and the agree box are `input[type=radio]`, so `.click()` them. Read every
+  field back, then `.click()` the Submit button; the page swaps in place to the form's
+  thank-you text (the URL stays the same).
