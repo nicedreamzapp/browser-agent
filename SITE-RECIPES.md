@@ -251,3 +251,39 @@ Rules for the list:
   the "Use this repository" button is what filled the hidden fields and the verification
   token. Run IIFEs in repeated `Runtime.evaluate` calls: a top-level `const` from an
   earlier call throws on redeclaration and returns nothing.
+
+## Getting a debug port onto an already-running Brave on Windows
+
+- **`MainWindowHandle` finds only one window per process, so a close loop over
+  `Get-Process brave` misses the rest (verified 2026-10-26).** Every Brave window belongs
+  to the same browser pid, and .NET reports a single "main" handle for it. Posting
+  `WM_CLOSE` to that one handle shuts one window and leaves the browser alive, so the
+  relaunch is skipped and you learn nothing. Enumerate the windows yourself:
+  `EnumWindows` + `IsWindowVisible` + `GetWindowThreadProcessId`, keep the handles whose
+  pid is in `(Get-Process brave).Id`, and `PostMessage WM_CLOSE` to each. Then poll until
+  `Get-Process brave` is empty before relaunching. Never `Stop-Process` — a killed
+  Chromium does not write its session file and the tabs are gone for good.
+- **`--restore-last-session` brings back ordinary windows but not `--app=` windows.** A
+  site installed as an app window has no entry in the restored session, so after the
+  relaunch you have to start it again yourself with `--app=<url>`. Know the app URL
+  *before* you close anything; there is no way to read it back once the window is gone.
+- **`Start-Process brave` immediately after the last process exits can no-op.** The
+  profile lock takes a moment to clear. If CDP never answers, just run the same
+  `Start-Process` again a few seconds later rather than adding force-kill logic.
+
+## Etsy listing editor
+
+- **Match variation rows by text, never by input id (verified 2026-10-26).** The editor
+  regenerates `variation-quantity-<uuid>` ids on every render, so an id captured before a
+  reload is dead. Find the quantity inputs with `/quant/i` against
+  `id + name + aria-label`, then read `closest('tr, [role=row], li, div[class*=row]')`
+  for the row text.
+- **Sizes read as `"L US letter"`, so `/\bL US letter/` isolates Large.** The word
+  boundary excludes `XL US letter` (the L is preceded by `X`), and `2X US letter` has no
+  L at all. Matching a bare `/L/` silently zeroes XL too.
+- **The save button is labelled "Publish changes", not "Save".** A generic
+  `/^(save|update)/i` sweep finds nothing and the edit is lost on close. After clicking,
+  the editor navigates to the listings index — treat that redirect as the success signal,
+  then reopen the editor and re-read the rows to confirm the quantities stuck.
+- **Scroll the whole page before reading.** Variation rows are lazy-mounted; a tab that
+  was never scrolled reports zero quantity inputs.
