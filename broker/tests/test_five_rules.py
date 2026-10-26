@@ -501,3 +501,24 @@ def test_a_visible_by_design_lease_with_no_input_still_closes(stack):
     stack.fake.visible.add(tid)
     code, r = release(stack, l["lease_id"])
     assert r["tab_closed"] is True and tid not in stack.fake.targets
+
+
+def test_long_polling_job_does_not_turn_its_own_typing_into_his(monkeypatch):
+    # 2026-10-25: a Gemini job typed its question by script, then polled ~200 times for the answer.
+    # At release the page's record of that typing was re-judged after the old touch cap dropped the
+    # typing script, so the tab was left open "for the human". Three tabs piled up on his screen.
+    import proxy
+    h = proxy.Humans()
+    now = time.time()
+    h.agent_touch("T", now)                                        # the script that typed the question
+    assert h.note("T", now + 0.01, "input") is False               # pushed live: the agent's
+    for i in range(500):                                           # minutes of polling for the answer
+        h.agent_touch("T", now + 4 + i * 0.8)
+    h.merge("T", [[now + 0.01, "input"]])                          # release reads the page's own record
+    assert h.touched_since("T", now - 1) is False
+    h2 = proxy.Humans()                                            # even with no live push, merge alone
+    h2.agent_touch("T", now)
+    for i in range(500):
+        h2.agent_touch("T", now + 4 + i * 0.8)
+    h2.merge("T", [[now + 0.01, "input"]])
+    assert h2.touched_since("T", now - 1) is False

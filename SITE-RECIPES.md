@@ -187,6 +187,12 @@ Rules for the list:
   an Enter keypress and a mouse press at the button's coordinates did nothing. Gemini
   needed a dispatched click on its Send button. DeepSeek's send is the empty-text
   `div.ds-button--primary`.
+- **Gemini (2026-10-25):** type with `document.execCommand('insertText', ...)` into
+  `rich-textarea .ql-editor` after `focus()` (assigning `innerHTML` throws: the page enforces
+  Trusted Types). A plain `click()` on "Send message" DOES send, even when the hidden tab's URL
+  and `message-content` look unchanged for a while. Never resend on "no reply yet": check the
+  sidebar for a new chat title first. One job resent 3 times and made 3 chats. Poll for the
+  answer every 10-15s, not every 4s, and give up after a few minutes instead of looping.
 
 ## OAuth sign-in and news submission sites
 

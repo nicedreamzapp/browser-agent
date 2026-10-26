@@ -463,6 +463,7 @@ class Humans:
         self.events = {}     # tid -> [(epoch seconds, kind)], oldest first
         self.agent = {}      # tid -> [epoch seconds an agent sent CDP input]
         self.touch = {}      # tid -> [epoch seconds of any agent command that can type (input or scripts)]
+        self.masked = {}     # tid -> {(t, kind)} already judged the agent's own; never re-judged later
         self.tasks = {}      # tid -> the watcher task holding the listener in place
 
     # ---- what happened -------------------------------------------------------
@@ -470,7 +471,7 @@ class Humans:
         t = time.time() if t is None else t
         a = self.agent.setdefault(tid, [])
         a.append(t)
-        del a[:-200]
+        del a[:-2000]
         self.agent_touch(tid, t)
 
     def agent_touch(self, tid, t=None):
@@ -478,7 +479,10 @@ class Humans:
         a = self.touch.setdefault(tid, [])
         a.append(time.time() if t is None else t)
         a.sort()
-        del a[:-200]
+        # 2026-10-25: a Gemini job polled for its answer ~200 times and the 200-entry cap dropped the
+        # script that typed the question, so at release the page's own record of that typing was
+        # re-judged as his and the tab was left open "for the human" (3 tabs piled up). Keep far more.
+        del a[:-2000]
 
     def _is_echo(self, tid, t, kind=""):
         if any(a - 0.25 <= t <= a + AGENT_ECHO for a in self.agent.get(tid, ())):
@@ -492,7 +496,13 @@ class Humans:
 
     def note(self, tid, t, kind):
         """Record one trusted input event. False when it was really the agent's own input."""
+        m = self.masked.setdefault(tid, set())
+        if (round(t, 3), kind) in m:
+            return False
         if self._is_echo(tid, t, kind):
+            m.add((round(t, 3), kind))
+            if len(m) > 500:
+                m.discard(min(m))
             return False
         ev = self.events.setdefault(tid, [])
         if (t, kind) in ev:
@@ -570,6 +580,7 @@ class Humans:
         self.events.pop(tid, None)
         self.agent.pop(tid, None)
         self.touch.pop(tid, None)
+        self.masked.pop(tid, None)
 
     async def _watch(self, tid):
         me = asyncio.current_task()
