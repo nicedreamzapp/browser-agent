@@ -14,6 +14,11 @@
 # Exit 0 closed something · 3 nothing matched · 1 error / broker down.
 set -u
 API="${BROKER_URL:-http://127.0.0.1:9223}"
+# bb-close --matt-asked "<his words>" <tab-id>: close a tab the broker counts as his, because he asked (2026-10-26)
+if [ "${1:-}" = "--matt-asked" ]; then
+  BODY=$(ASKED="${2:-}" TGT="${3:-}" python3 -c 'import json,os; print(json.dumps({"asked":os.environ["ASKED"],"target":os.environ["TGT"]}))')
+  curl -sS -m 30 -X POST "$API/close-for-matt" -H "Content-Type: application/json" -d "$BODY"; echo; exit 0
+fi
 MATCH="${1:-}"
 [ -z "$MATCH" ] && { echo "usage: bb-close <owner|url-substring>" >&2; exit 1; }
 

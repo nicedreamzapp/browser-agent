@@ -1057,6 +1057,30 @@ class Stage:
         return False
 
 
+
+async def close_for_matt(prefix, asked):
+    """Close the tab whose id starts with `prefix` because Matt asked in words. Refused while he is using it."""
+    import urllib.request as _u
+    try:
+        tabs = json.loads(_u.urlopen(f"http://127.0.0.1:{UPSTREAM}/json/list", timeout=5).read())
+    except Exception as e:
+        return {"closed": [], "error": f"browser not answering: {e}"}
+    hit = [t for t in tabs if t.get("type") == "page" and t.get("id", "").startswith(prefix)]
+    if len(hit) != 1:
+        return {"closed": [], "error": f"{len(hit)} tabs match {prefix}; need exactly one"}
+    tid = hit[0]["id"]
+    if HUMANS.active(tid):
+        return {"closed": [], "left_open": [{"target": tid[:12], "why": "he is typing or clicking in it right now"}]}
+    try:
+        _u.urlopen(f"http://127.0.0.1:{UPSTREAM}/json/close/{tid}", timeout=5).read()
+    except Exception as e:
+        return {"closed": [], "error": f"close failed: {e}"}
+    if REG is not None:
+        REG.tabs.pop(tid, None)
+    HUMANS.forget(tid)
+    log(f"tab {tid[:12]} closed because Matt asked: \"{asked[:120]}\" ({hit[0].get('url', '')[:80]})")
+    return {"closed": [{"target": tid[:12], "url": hit[0].get("url", "")}]}
+
 REG: Registry = None
 UP: Upstream = None
 STAGE: Stage = None
@@ -1609,6 +1633,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if not match:
                     return self._reply(400, {"error": "unshow needs an owner or a url substring (match)"})
                 return self._reply(200, self._run(STAGE.unshow(match)))
+            if self.path.startswith("/close-for-matt"):
+                # 2026-10-26 Matt: "close all the tabs on my M5 that you're finished with". A tab the broker counts as
+                # his (it lost track of whose it was, or he really used it) can be closed only when he asked for it
+                # in words (quoted in the log), by exact target id, and never while he is typing or clicking in it.
+                tgt, asked = str(b.get("target") or ""), str(b.get("asked") or "").strip()
+                if len(tgt) < 8 or not asked:
+                    return self._reply(400, {"error": "need target (8+ chars of the tab id) and asked (Matt's words)"})
+                return self._reply(200, self._run(close_for_matt(tgt, asked)))
             if self.path.startswith("/unstage"):
                 return self._reply(200, {"freed": STAGE.free()})
             if self.path.startswith("/adopt"):
