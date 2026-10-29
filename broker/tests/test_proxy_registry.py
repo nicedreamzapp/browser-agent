@@ -102,17 +102,19 @@ def test_log_never_raises(stack, monkeypatch, tmp_path):
 
 def test_trim_stdio_empties_big_regular_files(stack, monkeypatch, tmp_path):
     p = stack.proxy
-    f = open(tmp_path / "launchd.err", "w+")
-    f.write("x" * 50)
-    f.flush()
+    big = tmp_path / "launchd.err"
+    big.write_text("x" * 50)
+    # Stat once, up front. The fake must not hold an open file: monkeypatch puts
+    # os.fstat back only at teardown, and the proxy's background thread can call
+    # it in between (that read a closed file and failed CI on 3.12/3.14).
+    st = os.stat(big)
     monkeypatch.setattr(p, "STDIO_MAX", 10)
-    monkeypatch.setattr(p.os, "fstat", lambda fd: os.stat(f.fileno()))
+    monkeypatch.setattr(p.os, "fstat", lambda fd: st)
     truncated = []
     monkeypatch.setattr(p.os, "ftruncate", lambda fd, n: truncated.append((fd, n)))
     monkeypatch.setattr(p.os, "lseek", lambda fd, pos, how: None)
     p._trim_stdio()
-    assert truncated == [(1, 0), (2, 0)]
-    f.close()
+    assert truncated[:2] == [(1, 0), (2, 0)]
 
 
 def test_upstream_reports_dropped_control_socket(stack):
