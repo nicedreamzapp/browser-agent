@@ -251,6 +251,12 @@ Everything is configured by environment: `BROKER_PROXY_PORT` (9222, what tools d
 curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/broker/get.sh | bash
 ```
 
+Uninstall (keeps your browser and profile; add `-s -- --purge` to delete the clone too):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/broker/uninstall.sh | bash
+```
+
 Or by hand:
 
 ```bash
@@ -338,7 +344,7 @@ Designed and written by Matt Macosko:
 - [`bb-close`](bb-close): closes what `bb-show` put up once the task is done (by owner or URL substring). Rule: close every tab you opened.
 - [`hooks-example-focus-guard.py`](hooks-example-focus-guard.py): an example Claude Code `PreToolUse` hook that redirects `open -a <browser>` and AppleScript `activate` to `bb-show`.
 - [`broker.py`](broker.py): the first version, a standalone lease broker with `/adopt`. Kept for reference; the installer does not run it.
-- [`get.sh`](get.sh), [`install.sh`](install.sh), [`launch-browser.sh`](launch-browser.sh), [`launchd/com.browser-broker.plist`](launchd/com.browser-broker.plist): the macOS one-line installer, browser launcher and LaunchAgent.
+- [`get.sh`](get.sh), [`install.sh`](install.sh), [`uninstall.sh`](uninstall.sh), [`launch-browser.sh`](launch-browser.sh), [`launchd/com.browser-broker.plist`](launchd/com.browser-broker.plist): the macOS one-line installer, browser launcher and LaunchAgent.
 - [`windows/install.ps1`](windows/install.ps1), [`windows/launch-browser.ps1`](windows/launch-browser.ps1), [`windows/run-broker.ps1`](windows/run-broker.ps1): the Windows installer (Task Scheduler at-logon task), browser launcher and the supervisor that keeps `proxy.py` alive.
 
 Upstream, not mine: the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) and the Chrome/Brave browsers (Chromium team), and the [`websockets`](https://github.com/python-websockets/websockets) and [`websocket-client`](https://github.com/websocket-client/websocket-client) Python libraries. See [CREDITS.md](CREDITS.md).

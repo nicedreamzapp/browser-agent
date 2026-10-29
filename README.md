@@ -126,7 +126,13 @@ One honest limit: a captcha inside a cross-site frame keeps its clicks to itself
 curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/broker/get.sh | bash
 ```
 
-It clones this repo into `~/.browser-agent` (or keeps using an older `~/.browser-broker` checkout) and runs the broker from its `broker/` folder. If a broker already answers on 9223 it prints the status and stops, so it never installs a second one. By hand instead:
+It clones this repo into `~/.browser-agent` (or keeps using an older `~/.browser-broker` checkout), runs the broker from its `broker/` folder and adds a `browser-agent` command for the agent in `~/.local/bin`. If a broker already answers on 9223 it leaves that one alone, so it never installs a second one. `BROKER_SKIP_BROWSER=1` skips the browser relaunch. To remove it (your browser and profile are not touched; `--purge` also deletes `~/.browser-agent`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/broker/uninstall.sh | bash
+```
+
+By hand instead:
 
 ```bash
 git clone https://github.com/nicedreamzapp/browser-agent && cd browser-agent/broker
@@ -141,11 +147,10 @@ Python 3.9+. Brave is the default; for Chrome: `BROWSER_APP="Google Chrome" ./la
 **2. The agent.** Needs Apple Silicon (32 GB+ unified memory recommended), Python 3.12+, and the local MLX server from [claude-code-local](https://github.com/nicedreamzapp/claude-code-local):
 
 ```bash
-cd ~/.browser-agent            # or your own clone of this repo
-pip install websockets         # the only third-party package agent.py imports
-pip install mlx mlx-lm         # for the MLX server from claude-code-local
-python agent.py
+browser-agent                  # installed by get.sh above (its own venv with websockets)
 ```
+
+Or from your own clone: `pip install websockets` (the only third-party package `agent.py` imports), then `python agent.py`.
 
 With the broker running, the agent leases its own background tab on its own (`BROKER_URL`, default `http://127.0.0.1:9223`). Without it, it falls back to raw CDP on 9222 and says so. Full setup, the launcher and settings are under [Setup and usage](#setup-and-usage).
 

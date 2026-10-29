@@ -85,7 +85,7 @@ if [ "${BROKER_SKIP_AGENT:-0}" != "1" ]; then
     [ -n "$APY" ] || die "python3 is required for the browser agent"
     say "setting up the browser agent (venv in $AGENT_DIR/.venv)"
     [ -x "$AGENT_DIR/.venv/bin/python3" ] || "$APY" -m venv "$AGENT_DIR/.venv"
-    "$AGENT_DIR/.venv/bin/python3" -m pip install --quiet --upgrade "websockets>=13" \
+    "$AGENT_DIR/.venv/bin/python3" -m pip install --quiet --disable-pip-version-check --upgrade "websockets>=13" \
       || say "could not install websockets for the agent; the broker still works"
     BIN_DIR="${KIT_BIN_DIR:-$HOME/.local/bin}"
     mkdir -p "$BIN_DIR"
