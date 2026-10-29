@@ -462,11 +462,36 @@ def _cross_site(text, here):
             if " " + run + " " in xw and run not in " ".join(_words(task)): return f'"{run}" (read on {origin})'
     return None
 
+_SAFE_SCHEMES = ("http", "https")
+_ANY_SCHEME_RE = re.compile(r"^([a-z][a-z0-9+.\-]*):", re.I)
+_HOSTPORT_RE = re.compile(r"^[a-z0-9.\-]+:\d+([/?#]|$)", re.I)
+
+def normalize_url(url):
+    """Returns (url, error). A bare host such as "example.com" or "en.wikipedia.org/wiki/X"
+    becomes https://..., a protocol-relative "//host/x" becomes https://host/x, and http(s)
+    URLs and about:blank pass through. Any other scheme (javascript:, file:, data:, chrome:,
+    blob:, view-source:, ftp: ...) comes back as an error."""
+    u = str(url or "").strip()
+    if not u: return u, None
+    if u.lower() == "about:blank": return u, None
+    if u.startswith("//"): return "https:" + u, None
+    m = _ANY_SCHEME_RE.match(u)
+    if m and not _HOSTPORT_RE.match(u):
+        scheme = m.group(1).lower()
+        if scheme in _SAFE_SCHEMES and u[m.end():].startswith("//"): return u, None
+        return u, f"{scheme}: URLs are not allowed, only http and https pages"
+    if re.search(r"\s", u): return u, None   # not a host: leave it for the browser to reject
+    return "https://" + u, None
+
 def guard_check(tool, args):
     """Returns a BLOCKED message for a disallowed call, or None when the call may run."""
     task = _GUARD["task"]
     why = None
-    if _GUARD["seen"]:
+    if tool == "navigate":
+        fixed, err = normalize_url(args.get("url", ""))
+        if err: why = err
+        else: args["url"] = fixed
+    if not why and _GUARD["seen"]:
         if tool in _SYSTEM_TOOLS and not _SYSTEM_TASK_RE.search(task):
             why = f"{tool} is off while browsing, because the user's task did not ask for shell or file work"
         elif tool in _MEDIA_TOOLS and not _MEDIA_TASK_RE.search(task):
@@ -560,9 +585,35 @@ def _broker_tab():
     _install_exit_hooks()
     return g["ws_url"]
 
+_PLAIN = {}   # plain CDP browser (no broker): page ids that existed before this agent started
+
+def _page_ids():
+    with urllib.request.urlopen(f"{CDP_URL}/json", timeout=5) as r:
+        return {p["id"] for p in json.loads(r.read()) if p.get("type") == "page" and p.get("id")}
+
+def _plain_snapshot():
+    """Plain CDP path: remember which tabs the human already had, so only tabs that appear
+    during the task (popups, target=_blank, window.open) count as ours."""
+    if "before" in _PLAIN: return   # a kept tab from the previous question: keep the first baseline
+    try: _PLAIN["before"] = _page_ids()
+    except Exception: return
+    _install_exit_hooks()
+
+def _plain_close_new():
+    """Plain CDP path: close every tab that was not there when the task started. Tabs the
+    human had open are never touched."""
+    before = _PLAIN.pop("before", None)
+    if before is None: return
+    try: now = _page_ids()
+    except Exception: return
+    for tid in now - before:
+        try: urllib.request.urlopen(f"{CDP_URL}/json/close/{tid}", timeout=5).read()
+        except Exception: pass
+
 def _release_tab():
     """Close this agent's leased tab now (the broker closes a tab on /release). Safe to call
     twice; the next task leases a fresh tab."""
+    _plain_close_new()
     g = dict(_BROKER); _BROKER.clear()
     if g.get("stop"): g["stop"].set()
     if g.get("lease_id"):
@@ -729,6 +780,7 @@ class CDP:
             ws_url = next((p["webSocketDebuggerUrl"] for p in pages if p.get("type")=="page" and "devtools" not in p.get("url","")), None)
             if not ws_url: ws_url = pages[0]["webSocketDebuggerUrl"] if pages else None
         if not ws_url: print(f"{R}No browser pages{RS}"); sys.exit(1)
+        if not _BROKER.get("lease_id"): _plain_snapshot()
         self.ws_url = ws_url
         self.ws = await websockets.connect(ws_url, max_size=50*1024*1024)
         for m in ["DOM.enable","Accessibility.enable","Page.enable","Runtime.enable"]: await self.cmd(m)
