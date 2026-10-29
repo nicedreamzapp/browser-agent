@@ -23,7 +23,7 @@ def test_shell_scripts_parse(script):
 
 
 @pytest.mark.parametrize("path", ["bb-show", "bb-close", "bb-peek", "get.sh", "install.sh", "launch-browser.sh",
-                                  "brave-cdp-guard.sh"])
+                                  "brave-cdp-guard.sh", "uninstall.sh"])
 def test_scripts_are_executable_in_git(path):
     # ROOT may be a subfolder of the checkout (broker/ inside browser-agent), so ask git
     # instead of looking for ROOT/.git.
@@ -38,7 +38,7 @@ def test_scripts_are_executable_in_git(path):
 def test_launchd_plist_is_well_formed():
     with open(PLIST, "rb") as f:
         p = plistlib.load(f)
-    assert p["Label"] == "com.browser-broker"
+    assert p["Label"] == "__LABEL__"   # install.sh fills in BROKER_LABEL (default com.browser-broker)
     assert any(a.endswith("proxy.py") for a in p["ProgramArguments"])
 
 
