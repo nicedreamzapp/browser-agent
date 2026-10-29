@@ -209,6 +209,13 @@ Rules for the list:
   domain only); Gemini's chips have no href, the URL is base64 inside the `jslog` attribute after
   `BardVeMetadataKey:`; Perplexity's full list appears after clicking the "Sources" button. Free Grok
   has a weekly cap ("You've hit your weekly limit"): read the page for it instead of waiting out a timeout.
+- **Perplexity signup and test-chat cleanup (verified 2026-10-29, hidden lease):** logged out, Perplexity answers every
+  question with "Sign up and repeat your request." "Continue with Google" navigates the same tab (no popup) to Google's
+  account chooser; click `[data-identifier="<email>"]`, then the consent page's "Continue" button. Onboarding is "Get started",
+  then a paid-plan page with no free button: `button[aria-label=Close]` declines it and lands on Free plan; dismiss the
+  Computer promo with "Maybe later". Deleting a stray chat: Grok `DELETE /rest/app-chat/conversations/soft/<id>` from the
+  logged-in tab (list via `/rest/app-chat/conversations`, read the prompt via `load-responses`); Gemini sidebar
+  `More options for <title>` → `[data-test-id=delete-button]` → the dialog's Delete.
 
 ## OAuth sign-in and news submission sites
 
