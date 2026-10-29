@@ -454,7 +454,13 @@ class Registry:
         front of it, he clicked in it, and 27s later (past HUMAN_QUIET) the lease
         released and the tab vanished under him. So: any real input from him since
         the lease began makes it his, and so does a hidden lease that is on screen
-        now (he switched to it). Visible-by-design leases close as before."""
+        now (he switched to it). Visible-by-design leases close as before.
+
+        2026-10-29: the visibility half is gone. A LinkedIn post from a hidden lease was
+        left open "for the human" with no input from anyone: a background tab opens right
+        beside the tab he is on, so it comes on screen whenever that tab closes, or when
+        the page focuses itself after an agent's click. Being on screen proves nothing
+        about him; only his real input (a key, click, paste or scroll) makes a tab his."""
         if HUMANS.active(tid):
             return "he is working in it"
         try:
@@ -469,7 +475,7 @@ class Registry:
         if HUMANS.touched_since(tid, info.get("created", 0)):
             return "he worked in it during the lease"
         if info.get("hidden") and v.get("visibility") == "visible":
-            return "it was opened hidden and he switched to it"
+            log(f"tab {tid[:12]} is on screen but got no input from the human: closing it as the agent's")
         return None
 
     async def release_owner(self, owner, why="client disconnected"):
@@ -561,7 +567,7 @@ HUMAN_JS = r"""(() => {
     try { if (typeof window.__bbHumanEvent === 'function') window.__bbHumanEvent(JSON.stringify([t, kind])); } catch (e) {}
   };
   const note = (e) => { if (e.isTrusted) send(e.type); };
-  for (const k of ['pointerdown', 'keydown', 'input', 'paste', 'change']) addEventListener(k, note, true);
+  for (const k of ['pointerdown', 'keydown', 'input', 'paste', 'change', 'wheel']) addEventListener(k, note, {capture: true, passive: true});
   addEventListener('blur', (e) => {
     if (!e.isTrusted || e.target !== window) return;
     setTimeout(() => { const a = document.activeElement; if (a && a.tagName === 'IFRAME') send('frame'); }, 0);

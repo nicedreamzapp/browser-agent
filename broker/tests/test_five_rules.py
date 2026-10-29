@@ -481,10 +481,55 @@ def test_lease_expiry_after_his_click_leaves_the_tab_open(stack):
     assert tid in stack.fake.targets and tid not in stack.reg.tabs
 
 
-def test_a_hidden_lease_on_screen_at_release_is_left_open(stack):
+def test_a_hidden_lease_on_screen_with_no_input_from_him_still_closes(stack):
+    # 2026-10-29: being on screen is not him. The tab in front closed, or the page focused itself.
     _, l = lease(stack, owner="cc", url="https://a.example/")      # hidden by default
     tid = l["target_id"]
-    stack.fake.visible.add(tid)                                    # he switched to it
+    stack.fake.visible.add(tid)
+    code, r = release(stack, l["lease_id"])
+    assert r["tab_closed"] is True and tid not in stack.fake.targets
+
+
+def test_a_hidden_lease_he_switched_to_and_scrolled_is_left_open(stack):
+    _, l = lease(stack, owner="cc", url="https://a.example/")
+    tid = l["target_id"]
+    stack.fake.visible.add(tid)
+    stack.reg.tabs[tid]["created"] -= 60                           # the lease began a minute ago
+    human_types(stack, tid, kind="wheel", ago=40)                  # reading it, quiet for 40s now
+    code, r = release(stack, l["lease_id"])
+    assert r["tab_closed"] is False and tid in stack.fake.targets
+
+
+def test_linkedin_post_from_a_hidden_lease_closes_on_release(stack):
+    # 2026-10-29, the mini: insertText, an image upload, a click on Post, all by the agent,
+    # each echoed by the page as trusted events, and the tab came on screen. Nobody touched it.
+    _, l = lease(stack, owner="linkedin-kit-post", url="https://www.linkedin.com/feed/?shareActive=true")
+    tid = l["target_id"]
+    c = stack.page_client(tid)
+    watched(stack, tid)
+    for method, params, echoes in [
+            ("Input.insertText", {"text": "In August someone asked"}, ["keydown", "input"]),
+            ("DOM.setFileInputFiles", {"files": ["/tmp/hero.jpg"], "objectId": "1"}, ["input", "change"]),
+            ("Input.dispatchMouseEvent", {"type": "mousePressed", "x": 5, "y": 5, "button": "left",
+                                          "clickCount": 1}, ["pointerdown"])]:
+        assert "error" not in c.call(method, **params)
+        for k in echoes:
+            stack.run(stack.fake.human(tid, k))                    # the page's own trusted echo
+            time.sleep(0.3)
+    stack.fake.visible.add(tid)                                    # it came on screen by itself
+    time.sleep(0.2)
+    assert stack.proxy.HUMANS.touched_since(tid, 0) is False
+    code, r = release(stack, l["lease_id"])
+    assert code == 200 and r["tab_closed"] is True and tid not in stack.fake.targets
+
+
+def test_his_real_click_during_a_lease_keeps_the_tab(stack):
+    _, l = lease(stack, owner="linkedin-kit-post", url="https://www.linkedin.com/feed/")
+    tid = l["target_id"]
+    c = stack.page_client(tid)
+    assert "error" not in c.call("Input.insertText", text="draft")
+    time.sleep(2)                                                  # well past the agent's echo window
+    human_types(stack, tid, kind="pointerdown", ago=0)             # he clicks in it
     code, r = release(stack, l["lease_id"])
     assert r["tab_closed"] is False and tid in stack.fake.targets
 
