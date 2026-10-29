@@ -35,8 +35,12 @@ d=json.loads(os.environ["JSON"])
 tabs=d.get("tabs",[])
 for t in tabs:
     who = ", ".join(t.get("shown_by") or []) or t.get("leased_by") \
+          or (("%s (a child tab its tab %s opened)" % (t.get("child_owner"), t.get("child_of")))
+              if t.get("child_of") else None) \
           or ("an agent" if t.get("opened_by_broker") else "the human (his own tab)")
     print("tab %s, job of %s" % (t.get("target"), who))
+    for k in t.get("children") or []:
+        print("  opened: child tab %s %s (closes with this one)" % (k.get("target"), k.get("url", "")))
     print("  url:    %s" % t.get("url",""))
     print("  title:  %s" % t.get("title",""))
     print("  shows:  %s" % (t.get("text") or "(no text)"))

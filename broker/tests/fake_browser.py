@@ -58,6 +58,22 @@ class FakeBrowser:
                              "browserContextId": "DEFAULT"}
         return tid
 
+    async def open_child(self, opener, url="https://site.example/popup", announce=True):
+        """The page in tab `opener` opens a new tab by itself (target=_blank after a
+        form submit, window.open, an OAuth popup). Chrome names the opener in the
+        new target's openerId and announces it to every discovering connection.
+        announce=False simulates an event the proxy missed."""
+        tid = uuid.uuid4().hex.upper()
+        self.targets[tid] = {"targetId": tid, "type": "page", "title": "", "url": url,
+                             "attached": False, "canAccessOpener": False, "openerId": opener,
+                             "browserContextId": "DEFAULT"}
+        for c in list(self.conns):
+            if c.discover and announce:
+                await self._emit(c, "Target.targetCreated", {"targetInfo": self.targets[tid]})
+            if c.auto_attach:
+                await self._attach(c, tid)
+        return tid
+
     async def human(self, tid, kind="keydown", t=None):
         """Simulate the person typing or clicking in tab `tid`: the in-page listener
         records it and calls the broker's binding, exactly as the injected script does."""

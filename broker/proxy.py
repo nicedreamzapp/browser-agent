@@ -132,11 +132,25 @@ class Upstream:
         self.version = await self._http("/json/version")
         self.ws = await ws_connect(self.version["webSocketDebuggerUrl"], max_size=None)
         asyncio.create_task(self._reader())
+        # 2026-10-29: hear about every new tab, so one that a broker tab opens by
+        # itself (target=_blank, window.open, an OAuth popup) is known as that
+        # tab's child and closed with it. The reply needs nobody waiting on it,
+        # and send() cannot be used here: it holds the lock that called us.
+        self._id += 1
+        await self.ws.send(json.dumps({"id": self._id, "method": "Target.setDiscoverTargets",
+                                       "params": {"discover": True}}))
 
     async def _reader(self):
         try:
             async for raw in self.ws:
                 m = json.loads(raw)
+                if "id" not in m:
+                    if REG is not None and m.get("method", "").startswith("Target."):
+                        try:
+                            REG.on_target_event(m["method"], m.get("params") or {})
+                        except Exception as e:
+                            log(f"target event {m.get('method')} not handled: {type(e).__name__}: {e}")
+                    continue
                 fut = self._pending.pop(m.get("id"), None)
                 if fut and not fut.done():
                     fut.set_result(m)
@@ -181,6 +195,7 @@ class Registry:
     def __init__(self, up):
         self.up = up
         self.tabs = {}      # target_id -> dict(owner, kind, hidden, created, expires, attached, lease_id)
+        self.children = {}  # target_id -> dict(owner, parent, created, url): tabs a broker tab opened itself
         self.loop = None
 
     def _save(self):
@@ -269,38 +284,168 @@ class Registry:
     def owned_by(self, owner):
         return [t for t, i in self.tabs.items() if i["owner"] == owner]
 
+    # ---- child tabs (2026-10-29) ---------------------------------------------
+    # A DevHunt listing tab stayed open in Matt's browser after an agent reported
+    # "tabs closed": submitting the form in its leased tab made the SITE open a
+    # new tab (target=_blank), which the broker never opened and so never knew
+    # about. Chrome names the tab that opened a page (targetInfo.openerId, set even
+    # for noopener links). A page whose opener is one of ours is ours too, owned by
+    # the same job, and it goes when its parent goes, under the parent's rules.
+    # A tab whose opener is not ours (his own tabs) is never recorded.
+    def owner_of(self, tid):
+        """The owner a tab the broker controls belongs to: a lease or client tab,
+        a child of one, or a job tab on screen. None for anything else."""
+        if tid in self.tabs:
+            return self.tabs[tid]["owner"]
+        if tid in self.children:
+            return self.children[tid]["owner"]
+        if STAGE is not None and tid in STAGE.created:
+            return STAGE.job_of(tid)           # a job shown on his own tab does not make its children ours
+        return None
+
+    def note_child(self, info):
+        """Record `info` (a targetInfo) as a child tab if one of our tabs opened it."""
+        tid, opener = info.get("targetId"), info.get("openerId")
+        if (info.get("type") != "page" or not tid or not opener or tid == opener
+                or tid in self.tabs or tid in self.children):
+            return False
+        owner = self.owner_of(opener)
+        if owner is None:
+            return False                       # opened from a tab that is not ours: his
+        self.children[tid] = {"owner": owner, "parent": opener, "created": time.time(),
+                              "url": info.get("url", "")}
+        HUMANS.watch(tid)
+        log(f"tab {tid[:12]} -> {owner} (opened by its tab {opener[:12]}, a child tab)")
+        return True
+
+    def on_target_event(self, method, p):
+        """Target.* events on the proxy's own control socket."""
+        if method == "Target.targetCreated":
+            self.note_child(p.get("targetInfo") or {})
+        elif method == "Target.targetInfoChanged":
+            info = p.get("targetInfo") or {}
+            if info.get("targetId") in self.children:
+                self.children[info["targetId"]]["url"] = info.get("url", "")
+            else:
+                self.note_child(info)          # Chrome may fill in the opener late
+        elif method == "Target.targetDestroyed":
+            if self.children.pop(p.get("targetId"), None) is not None:
+                HUMANS.forget(p.get("targetId"))
+
+    async def scan_children(self):
+        """Pick up child tabs whose targetCreated event this proxy missed (its
+        control socket reconnected, or the tab came up before it was listening)."""
+        try:
+            infos = (await self.up.send("Target.getTargets")).get("targetInfos", [])
+        except Exception:
+            return
+        while any([self.note_child(i) for i in infos]):
+            pass                               # grandchildren need their parent recorded first
+
+    def children_of(self, parent):
+        return [c for c, i in self.children.items() if i["parent"] == parent]
+
+    def _opened_by_him(self, child, info):
+        """True when the human's own click in the parent opened this tab (real input
+        in the parent just before it appeared). Agent input is already discounted."""
+        t = info["created"]
+        return any(t - 3 <= e <= t + 1 for e, _ in HUMANS.events.get(info["parent"], ()))
+
+    async def close_children(self, parent, why=""):
+        """Close every child tab of `parent`, grandchildren included, under the same
+        rules as a lease tab: one the human is working in, worked in, or opened
+        himself is left open and handed to him. Returns (closed, left_open)."""
+        closed, left = [], []
+        for c in self.children_of(parent):
+            kc, kl = await self.close_child(c, why)
+            closed += kc
+            left += kl
+        return closed, left
+
+    async def close_child(self, c, why=""):
+        """Close one child tab and its own children, or hand it to the human."""
+        info = self.children.pop(c, None)
+        if info is None:
+            return [], []
+        parent = info["parent"]
+        entry = {"owner": info["owner"], "target": c[:12], "child_of": parent[:12],
+                 "url": info.get("url", "")}
+        his = "he opened it himself" if self._opened_by_him(c, info) else \
+            await self._his_now(c, {"created": info["created"]})
+        if his:
+            sub_left = self.leave_children(c, his)
+            HUMANS.forget(c)
+            log(f"child tab {c[:12]} left open for the human ({info['owner']}, {why or 'released'}): {his}")
+            return [], [dict(entry, why=his)] + sub_left
+        closed, left = await self.close_children(c, why)
+        HUMANS.forget(c)
+        try:
+            await self.up.send("Target.closeTarget", targetId=c)
+        except Exception:
+            pass
+        log(f"child tab {c[:12]} closed ({info['owner']}, opened by {parent[:12]}"
+            f"{', ' + why if why else ''})")
+        return closed + [entry], left
+
+    def leave_children(self, parent, why):
+        """Hand `parent`'s child tabs to the human with it: forget them, close nothing."""
+        left = []
+        for c in self.children_of(parent):
+            info = self.children.pop(c, None)
+            if info is None:
+                continue
+            left += self.leave_children(c, why)
+            HUMANS.forget(c)
+            left.append({"owner": info["owner"], "target": c[:12], "child_of": parent[:12],
+                         "url": info.get("url", ""), "why": why})
+        if left:
+            log(f"{len(left)} child tab(s) of {parent[:12]} left open with it: {why}")
+        return left
+
     def free_pool(self):
         """Tabs made for legacy /json clients that nobody has attached to yet."""
         now = time.time()
         return [t for t, i in self.tabs.items()
                 if i["kind"] == "pool" and i["attached"] == 0 and i["listed_until"] <= now]
 
-    async def close(self, tid, why=""):
-        """Close a tab the broker made. True if it closed.
+    async def close(self, tid, why="", report=None):
+        """Close a tab the broker made, and the child tabs it opened. True if it closed.
 
         Two exceptions, and both leave the tab open: it is also an open job tab
         on the human's screen (bb-close finishes that), or the human is working
-        in it right now (rule 4: it is his, and closing it would wipe his work)."""
+        in it right now (rule 4: it is his, and closing it would wipe his work).
+        Its children follow it: kept with a job tab, handed to him with his tab.
+        `report`, a dict, gets the children's "children_closed" / "children_left_open"."""
+        if tid not in self.tabs:
+            return False
+        await self.scan_children()             # while the parent is still ours, so its children resolve
         info = self.tabs.pop(tid, None)
         if info is None:
             return False
         self._save()
-        if STAGE is not None and STAGE.job_of(tid):
-            log(f"tab {tid[:12]} lease ended ({info['owner']}, {why or 'released'}); kept open, "
-                f"it is the shown job tab of {STAGE.job_of(tid)}")
-            return False
-        his = await self._his_now(tid, info)
-        if his:
-            HUMANS.forget(tid)
-            log(f"tab {tid[:12]} left open for the human ({info['owner']}, {why or 'released'}): {his}")
-            return False
-        HUMANS.forget(tid)
+        kids_closed, kids_left = [], []
         try:
-            await self.up.send("Target.closeTarget", targetId=tid)
-        except Exception:
-            pass
-        log(f"tab {tid[:12]} closed ({info['owner']}{', ' + why if why else ''})")
-        return True
+            if STAGE is not None and STAGE.job_of(tid):
+                log(f"tab {tid[:12]} lease ended ({info['owner']}, {why or 'released'}); kept open, "
+                    f"it is the shown job tab of {STAGE.job_of(tid)}")
+                return False
+            his = await self._his_now(tid, info)
+            if his:
+                kids_left = self.leave_children(tid, his)
+                HUMANS.forget(tid)
+                log(f"tab {tid[:12]} left open for the human ({info['owner']}, {why or 'released'}): {his}")
+                return False
+            kids_closed, kids_left = await self.close_children(tid, why)
+            HUMANS.forget(tid)
+            try:
+                await self.up.send("Target.closeTarget", targetId=tid)
+            except Exception:
+                pass
+            log(f"tab {tid[:12]} closed ({info['owner']}{', ' + why if why else ''})")
+            return True
+        finally:
+            if report is not None:
+                report["children_closed"], report["children_left_open"] = kids_closed, kids_left
 
     async def _his_now(self, tid, info):
         """Why tab `tid` now belongs to the human, or None if the broker may close it.
@@ -352,14 +497,29 @@ class Registry:
             HUMANS.forget(tid)
         if gone:
             self._save()
+        for tid in [c for c in self.children if c not in live]:
+            self.children.pop(tid, None)
+            HUMANS.forget(tid)
 
     def status(self):
         now = time.time()
         return {"tabs": [{"target": t[:12], "owner": i["owner"], "kind": i["kind"],
                           "hidden": i["hidden"], "attached": i["attached"],
                           "expires_in": round(i["expires"] - now, 1) if i["kind"] != "ws" else None,
-                          "lease_id": i["lease_id"]} for t, i in self.tabs.items()],
-                "count": len(self.tabs)}
+                          "lease_id": i["lease_id"], "children": self.child_list(t)}
+                         for t, i in self.tabs.items()],
+                "count": len(self.tabs),
+                "children": [{"target": c[:12], "owner": i["owner"], "child_of": i["parent"][:12],
+                              "url": i.get("url", ""), "open_for": round(now - i["created"]),
+                              "human": HUMANS.info(c)} for c, i in self.children.items()]}
+
+    def child_list(self, parent):
+        """`parent`'s child tabs, grandchildren included, for /status and /stage."""
+        out = []
+        for c in self.children_of(parent):
+            out.append({"target": c[:12], "url": self.children[c].get("url", "")})
+            out += self.child_list(c)
+        return out
 
     def target_info(self, tid):
         """Shape a /json entry for a tab we own."""
@@ -748,7 +908,8 @@ class Stage:
                 "tabs": {o: t[:12] for o, t in self.tabs.items()},
                 "jobs": {o: {"site": j["site"], "tab": self.tabs.get(o, "")[:12],
                              "open_for": round(time.time() - j["since"]),
-                             "human": HUMANS.info(self.tabs.get(o, ""))}
+                             "human": HUMANS.info(self.tabs.get(o, "")),
+                             "children": REG.child_list(self.tabs.get(o, "")) if REG is not None else []}
                          for o, j in self.jobs.items()}}
 
     def job_of(self, tid):
@@ -903,14 +1064,20 @@ class Stage:
         for o, t in self.tabs.items():
             owners.setdefault(t, []).append(o)
         lessees = {t: i["owner"] for t, i in (REG.tabs.items() if REG is not None else ())}
+        kids = dict(REG.children) if REG is not None else {}
         tids = [t for t, i in live.items()
                 if match in owners.get(t, []) or match == lessees.get(t) or match in i.get("url", "")
+                or (t in kids and kids[t]["owner"] == match)
                 or (len(match) >= 8 and t.startswith(match))]
         hits = await asyncio.gather(*(self.peek_tab(tid, chars) for tid in tids))
         for tid, p in zip(tids, hits):
             p["shown_by"] = owners.get(tid) or None
             p["leased_by"] = lessees.get(tid)
-            p["opened_by_broker"] = tid in self.created or tid in lessees
+            p["opened_by_broker"] = tid in self.created or tid in lessees or tid in kids
+            if tid in kids:
+                p["child_of"] = kids[tid]["parent"][:12]
+                p["child_owner"] = kids[tid]["owner"]
+            p["children"] = REG.child_list(tid) if REG is not None else []
         return list(hits)
 
     async def _show_locked(self, mine, owner, url, purpose, dwell, reload=False):
@@ -990,9 +1157,13 @@ class Stage:
         return r
 
     async def _end_job(self, owner, live=None):
-        """Finish `owner`'s job: close its tab if the broker opened it. Returns
-        ("closed", info) or ("left", info). A tab the human is working in is never
-        closed: it is handed to him, and the broker forgets it."""
+        """Finish `owner`'s job: close its tab if the broker opened it, and the child
+        tabs that tab opened. Returns ("closed", info, kids_closed, kids_left) or
+        ("left", info, [], kids_left). A tab the human is working in is never
+        closed: it is handed to him with its children, and the broker forgets it."""
+        tid = self.tabs.get(owner)
+        if tid and REG is not None:
+            await REG.scan_children()          # while it is still the job's, so its children resolve
         tid = self.tabs.pop(owner, None)
         job = self.jobs.pop(owner, None)
         if not tid:
@@ -1001,22 +1172,26 @@ class Stage:
             self._note_churn(owner, job["keys"])
         url = (live or {}).get(tid, {}).get("url", "")
         if tid not in self.created:
-            return ("left", {"owner": owner, "target": tid[:12], "why": "the human's own tab"})
+            # His own tab, shown for this job: it stays, and so does whatever he opened from it.
+            kids = REG.leave_children(tid, "opened from the human's own tab") if REG is not None else []
+            return ("left", {"owner": owner, "target": tid[:12], "why": "the human's own tab"}, [], kids)
         self.created.discard(tid)
         if REG is not None and REG.tabs.pop(tid, None) is not None:
             REG._save()
         if HUMANS.active(tid):
+            kids = REG.leave_children(tid, "its tab is the human's now") if REG is not None else []
             HUMANS.forget(tid)
             log(f"stage tab {tid[:12]} left open for the human ({owner}): he is working in it")
             return ("left", {"owner": owner, "target": tid[:12],
-                             "why": "the human is working in it, so it is his now"})
+                             "why": "the human is working in it, so it is his now"}, [], kids)
+        kids_closed, kids_left = (await REG.close_children(tid, "job done")) if REG is not None else ([], [])
         HUMANS.forget(tid)
         try:
             await self.up.send("Target.closeTarget", targetId=tid)
         except Exception:
             pass
         log(f"stage tab {tid[:12]} closed ({owner}, job done)")
-        return ("closed", {"owner": owner, "target": tid[:12], "url": url})
+        return ("closed", {"owner": owner, "target": tid[:12], "url": url}, kids_closed, kids_left)
 
     async def unshow(self, match):
         """Finish the job(s) whose owner is `match`, or whose page URL contains it.
@@ -1036,8 +1211,18 @@ class Stage:
             res = await self._end_job(o, live)
             if res:
                 (closed if res[0] == "closed" else left).append(res[1])
+                closed += res[2]
+                left += res[3]
             if o == self.holder:
                 self.free(self._serial)
+        if REG is not None:
+            # Children of this owner whose parent is already gone (the human closed
+            # it, or a lease ended on it): bb-close <owner> still cleans them up.
+            for c, i in list(REG.children.items()):
+                if i["owner"] == match and i["parent"] not in live:
+                    kc, kl = await REG.close_child(c, "job done")
+                    closed += kc
+                    left += kl
         return {"closed": closed, "left_open": left}
 
     async def _decay(self, serial, dwell):
@@ -1537,7 +1722,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             s = REG.status()
             s["brave_alive"] = self._run(UP.alive())
             s["leases"] = [{"lease_id": t["lease_id"], "owner": t["owner"], "purpose": None,
-                            "target": t["target"], "expires_in": t["expires_in"]}
+                            "target": t["target"], "expires_in": t["expires_in"],
+                            "children": t["children"]}
                            for t in s["tabs"] if t["kind"] == "rest"]
             return self._reply(200, s)
         if self.path.startswith("/health"):
@@ -1599,8 +1785,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                     return self._reply(400, {"error": "lease_id is required"})
                 for tid, i in list(REG.tabs.items()):
                     if i.get("lease_id") == b.get("lease_id"):
-                        closed = self._run(REG.close(tid, "released"))
+                        kids = {}
+                        closed = self._run(REG.close(tid, "released", kids))
                         r = {"released": b["lease_id"], "tab_closed": bool(closed)}
+                        r.update({k: v for k, v in kids.items() if v})     # only when it had child tabs
                         if not closed:
                             r["left_open"] = ("it is a job tab on screen; bb-close finishes the job"
                                               if STAGE.job_of(tid) else "the human is working in it")

@@ -157,6 +157,19 @@ def test_close_posts_unshow(broker_url, fake_open):
     assert "closed: https://x/a (agent-7)" in p.stdout
 
 
+def test_close_names_child_tabs(broker_url, fake_open):
+    Broker.reply = {"closed": [{"owner": "dh", "target": "abc", "url": "https://x/a"},
+                               {"owner": "dh", "target": "def", "url": "https://x/popup",
+                                "child_of": "abc"}],
+                    "left_open": [{"owner": "dh", "target": "ghi", "child_of": "abc",
+                                   "why": "he is working in it"}]}
+    p = run_close(["dh"], {"BROKER_URL": broker_url}, fake_open)
+    assert p.returncode == 0, p.stderr
+    assert "closed: https://x/a (dh)" in p.stdout
+    assert "closed: https://x/popup (dh, child tab of abc)" in p.stdout
+    assert "left open: ghi (dh, child tab of abc): he is working in it" in p.stdout
+
+
 def test_close_nothing_matched_exits_3(broker_url, fake_open):
     Broker.reply = {"closed": [], "left_open": []}
     p = run_close(["nope"], {"BROKER_URL": broker_url}, fake_open)

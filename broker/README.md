@@ -203,6 +203,16 @@ Hidden work tabs close on their own: a lease's tab is closed (not just released)
 is released, when its TTL runs out, or when a browser-level client disconnects, and
 `broker_client.lease()` releases on exit, exceptions included.
 
+**Tabs the site opens count too (2026-10-29).** Submitting a form can make the site open a new
+tab by itself (`target=_blank`, `window.open`, an OAuth popup). The broker never opened that tab,
+so it used to stay behind after the agent reported its tabs closed. Chrome names the tab that
+opened every page (`openerId`), so a page opened from a broker tab is now that owner's child tab,
+grandchildren included. It closes with its parent on release, expiry, disconnect and `bb-close`,
+under the same rules: one the human is typing or clicking in, worked in, or opened with his own
+click is left open and reported (`children_left_open` from `/release`, `left_open` from
+`bb-close`). A tab opened from one of the human's own tabs is never recorded. `/status`, `/stage`
+and `bb-peek` list child tabs under their owner.
+
 ```
 A: HTTP 200 after 0.7s   shown
 B: HTTP 409 after 0.0s   stage held by agent-A for another 7.0s
@@ -291,7 +301,7 @@ Localhost only, no auth. Anything that can reach `127.0.0.1:9223` can drive your
 
 Built in one night and proven with four manual tests: a leased tab loading Gmail authenticated while the human's visible tab sat on a different account; two agents running concurrently on separate targets; a simulated agent crash whose lease expired and was reclaimed; the human's tabs untouched throughout. Those manual runs are not checked in.
 
-What is checked in is an automated suite in [`tests/`](tests/): 219 pytest tests that run the real `proxy.py`, `broker.py`, `broker_client.py`, `bb-show` and the hook example against a small fake Chrome DevTools endpoint ([`tests/fake_browser.py`](tests/fake_browser.py)) on loopback ports. It covers the ownership rules end to end (two clients blind to each other and to the human's tabs, focus stealers and `Browser.close` swallowed, tabs released on disconnect), the `/json` legacy path, the REST lease API, the stage queue, reaping and `tabs.json`. It needs no browser and no network, and runs on Linux in about 20 seconds. Two checks are macOS only (real `osascript`, `plutil`) and are skipped elsewhere. It does not drive a real Chrome, so the manual runs above still matter.
+What is checked in is an automated suite in [`tests/`](tests/): 245 pytest tests that run the real `proxy.py`, `broker.py`, `broker_client.py`, `bb-show` and the hook example against a small fake Chrome DevTools endpoint ([`tests/fake_browser.py`](tests/fake_browser.py)) on loopback ports. It covers the ownership rules end to end (two clients blind to each other and to the human's tabs, focus stealers and `Browser.close` swallowed, tabs released on disconnect), the `/json` legacy path, the REST lease API, the stage queue, reaping and `tabs.json`. It needs no browser and no network, and runs on Linux in about 20 seconds. Two checks are macOS only (real `osascript`, `plutil`) and are skipped elsewhere. It does not drive a real Chrome, so the manual runs above still matter.
 
 ```bash
 pip install -r requirements-dev.txt

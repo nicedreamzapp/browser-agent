@@ -35,6 +35,7 @@ fi
 JSON="$JSON" python3 -c '
 import json,os,sys
 d=json.loads(os.environ["JSON"])
-for t in d.get("closed",[]): print("closed: %s (%s)" % (t.get("url") or t["target"], t["owner"]))
-for t in d.get("left_open",[]): print("left open: %s (%s): %s" % (t["target"], t["owner"], t["why"]))
+kid=lambda t: ", child tab of %s" % t["child_of"] if t.get("child_of") else ""
+for t in d.get("closed",[]): print("closed: %s (%s%s)" % (t.get("url") or t["target"], t["owner"], kid(t)))
+for t in d.get("left_open",[]): print("left open: %s (%s%s): %s" % (t["target"], t["owner"], kid(t), t["why"]))
 sys.exit(0 if d.get("closed") else 3)' || { rc=$?; [ $rc -eq 3 ] && echo "nothing to close for: $MATCH" >&2; exit $rc; }
