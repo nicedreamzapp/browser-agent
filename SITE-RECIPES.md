@@ -84,6 +84,14 @@ Rules for the list:
   click "Upload from computer", then `DOM.setFileInputFiles` on that objectId, then "Next".
   In this editor, text first then image worked fine (the links did not hide Media).
   After Post, the toast's "View post" link holds `/feed/update/urn:li:share:<id>/`.
+  Re-verified 2026-10-29: clicking "Media" now opens the file picker directly (no
+  "Upload from computer" step), so the same `click` patch catches the input on the Media
+  click; after `DOM.setFileInputFiles`, "Next" returns to the composer. Image first, then a
+  text holding a link, kept the uploaded image (no link card).
+- **LinkedIn tab left open after the post (2026-10-29):** `/release` answered "left_open:
+  the human is working in it" and the leased tab was relabeled the human's own, though
+  nobody touched it (the Post submit fires trusted events). Always check Brave's real tab
+  list afterwards and close that tab by target id with `bb-close --matt-asked`.
 
 - **X (Twitter) composer:** Draft.js ignores `Input.insertText` AND `document.execCommand`
   in a background tab, so the composer stays empty. Show the composer as a visible tab
