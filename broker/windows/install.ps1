@@ -1,6 +1,8 @@
 # Install browser-broker on Windows as a Task Scheduler task that runs at logon,
 # in your interactive session, and keeps proxy.py alive. Run from anywhere:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File windows\install.ps1
+# (or the one-liner, which clones the repo first: windows\get.ps1)
+# BROKER_TASK names the task; BROKER_NO_START=1 registers it without starting it.
 $ErrorActionPreference = "Stop"
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $TaskName = if ($env:BROKER_TASK) { $env:BROKER_TASK } else { "browser-broker" }
@@ -24,6 +26,7 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
   -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal `
   -Settings $settings -Force | Out-Null
+if ($env:BROKER_NO_START -eq "1") { Write-Output "task '$TaskName' registered (not started: BROKER_NO_START=1)"; exit 0 }
 Start-ScheduledTask -TaskName $TaskName
 Write-Output "task '$TaskName' registered and started"
 

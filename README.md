@@ -156,7 +156,15 @@ With the broker running, the agent leases its own background tab on its own (`BR
 
 ### Windows
 
-**The broker** is verified on Windows 11 (Brave on Chromium 154, Python 3.14, logged-in real profile):
+**The broker** is verified on Windows 11 (Brave on Chromium 154, Python 3.14, logged-in real profile). One line in PowerShell clones this repo to `%USERPROFILE%\browser-agent` and runs the installer below (it does nothing if a broker already answers on 9223):
+
+```powershell
+irm https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/broker/windows/get.ps1 | iex
+```
+
+Uninstall (keeps the checkout unless you add `-Purge`): `powershell -ExecutionPolicy Bypass -File $HOME\browser-agent\broker\windows\uninstall.ps1`
+
+Or by hand:
 
 ```powershell
 git clone https://github.com/nicedreamzapp/browser-agent
