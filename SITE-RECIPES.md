@@ -194,6 +194,22 @@ Rules for the list:
   sidebar for a new chat title first. One job resent 3 times and made 3 chats. Poll for the
   answer every 10-15s, not every 4s, and give up after a few minutes instead of looping.
 
+- **Asking questions in a private chat from one hidden lease (verified 2026-10-29, ai-shelf job).**
+  Fresh chat URLs: ChatGPT `chatgpt.com/?temporary-chat=true`, Claude `claude.ai/new?incognito`,
+  Grok `grok.com/c#private`; Gemini needs a `button[aria-label="Temporary chat"]` click; Perplexity
+  works logged out. Type with `focus()` + `execCommand('insertText')` into `.ProseMirror` (ChatGPT,
+  Claude, Grok), `rich-textarea .ql-editor` (Gemini), `#ask-input` (Perplexity). Send by clicking
+  `button[aria-label="Send"]` / `"Send message"` / `"Submit"` / `button[type=submit]` (Grok).
+  Answer finished = no Stop button (Claude: no `[data-is-streaming="true"]`) and the answer text
+  unchanged across two polls 10s apart. Answer text lives in `[data-dil-message-id]` (ChatGPT, the old
+  `data-message-author-role` is gone), `model-response message-content`, `.prose`,
+  `.standard-markdown` (Claude; `.font-claude-response` is only a CSS variable now) and
+  `.response-content-markdown` (Grok; it matches the user's own bubble too, so drop the element whose
+  text equals the question). Citations: ChatGPT shows favicon pills (`img[src*="favicons?domain="]`,
+  domain only); Gemini's chips have no href, the URL is base64 inside the `jslog` attribute after
+  `BardVeMetadataKey:`; Perplexity's full list appears after clicking the "Sources" button. Free Grok
+  has a weekly cap ("You've hit your weekly limit"): read the page for it instead of waiting out a timeout.
+
 ## OAuth sign-in and news submission sites
 
 - **GitHub "Authorize" button stays disabled in a hidden tab.** GitHub's OAuth page keeps
