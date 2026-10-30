@@ -318,3 +318,28 @@ Rules for the list:
   then reopen the editor and re-read the rows to confirm the quantities stuck.
 - **Scroll the whole page before reading.** Variation rows are lazy-mounted; a tab that
   was never scrolled reports zero quantity inputs.
+
+## Yahoo Mail (the 2026 "novation" UI)
+
+- **Drive the tab bb-show already put up with `/lease` using the SAME owner and the SAME
+  url.** The proxy answers `/adopt` with 410 — agents only ever get tabs the broker made —
+  and `/lease` with no url opens a hidden second copy, then closes the shown one when it
+  releases. `/lease {"owner":"yahoo-inbox","url":"<the url bb-show got>","hidden":false}`
+  returns `shared_with_shown_job: true`, i.e. that exact tab. Release with `close:false`.
+- **None of the old `data-test-id` hooks exist.** There is no `selectall-checkbox` and no
+  `toolbar-mark-as-read`. Each row is `[data-test-id="message-list-item"]` holding an
+  unlabelled `span[role=checkbox]`; selecting any row makes the toolbar grow buttons whose
+  only identity is an aria-label: `Mark 44 selected messages as read`. Match
+  `/^mark\b.*\bas read$/` on the label and exclude anything containing `unread`, or the
+  scorer lands on "Mark as unread".
+- **`[data-test-id="unread-indicator"]` stays in the DOM after a row is read.** Counting it
+  reports every row unread forever. An unread row's `innerText` starts with
+  `Unread message`; the honest total is the page title's `(N unread)`.
+- **Sweep the left-nav "Unread" view, not the tab strip.** Primary / Offers / Social /
+  Newsletters each hide their own unread, and the strip items are not `[role=tab]`. The
+  `Unread` nav link (`[data-test-id="menu-list-item-link"]`) lists all of them in one list,
+  where select-all + mark-read empties it in one pass. Note it excludes Archive.
+- **The message list is virtual.** Only what is scrolled into view is in the DOM, and of the
+  two `virtual-list-container` elements only one actually scrolls — pick the one with
+  `scrollHeight > clientHeight`. Loop select → mark → scroll until a sweep picks nothing.
+- Script: `%APPDATA%\ineedhemp\_yahoo_markread.py` (`dry` to see the toolbar, `go` to clear).
