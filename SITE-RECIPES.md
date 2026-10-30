@@ -343,3 +343,27 @@ Rules for the list:
   two `virtual-list-container` elements only one actually scrolls — pick the one with
   `scrollHeight > clientHeight`. Loop select → mark → scroll until a sweep picks nothing.
 - Script: `%APPDATA%\ineedhemp\_yahoo_markread.py` (`dry` to see the toolbar, `go` to clear).
+
+## Hidden tabs: buttons that only work when the page thinks it is visible
+
+Learned claiming a Lounge.ai profile through GitHub OAuth, 2026-10-30.
+
+- **GitHub's "Authorize" button ships `disabled` and is re-enabled on a timer that never
+  fires in a hidden tab.** `document.visibilityState === 'hidden'` throttles the timer, so
+  the button stays dead forever and every click silently does nothing. Fix, right after the
+  page loads: `Emulation.setFocusEmulationEnabled {enabled: true}` and
+  `Page.setWebLifecycleState {state: "active"}`. The button went live in 1 second after that.
+  Poll `button[name=authorize][value="1"].disabled` instead of sleeping blind.
+- **Probe before you retry.** Two identical "click Authorize" attempts looked like a click
+  problem; dumping `[...document.forms]` with `disabled` on every element showed the real
+  cause in one pass. Dump the form, do not re-click.
+- **Click with `Input.dispatchMouseEvent`, not `el.click()`, on anything guarded.** Scroll
+  the element in, take `getBoundingClientRect()`, then press and release at its centre.
+- **Type with `Input.insertText` after a real click, never `el.value = x`.** React forms
+  (Lounge is Next.js) ignore a value assignment. To replace existing text, send a real
+  Ctrl+A first (`Input.dispatchKeyEvent` with `modifiers: 2`), then insert.
+- **A hidden lease dies on release, `close:false` or not** — the proxy's `/release` always
+  calls `close()` unless the tab is a shown job tab. So a multi-step flow (OAuth hop,
+  wizard) must run inside ONE lease, in one script. Splitting the steps across runs lands
+  every later step on a fresh `about:blank`. Server-persisted wizard steps are the exception:
+  those can be resumed by leasing the step URL again.
