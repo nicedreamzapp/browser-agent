@@ -22,6 +22,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 for _k in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
     os.environ.pop(_k, None)
 os.environ["NO_PROXY"] = os.environ["no_proxy"] = "127.0.0.1,localhost"
+# The Broker Recorder must never write a test run into the real ~/.local/broker-recordings.
+os.environ.pop("BROKER_RECORD", None)
+os.environ["BROKER_RECORD_DIR"] = os.path.join(__import__("tempfile").gettempdir(), "broker-recorder-tests")
 
 from websockets.asyncio.server import serve as ws_serve  # noqa: E402
 import websocket  # websocket-client, the library broker_client.py uses  # noqa: E402
@@ -137,7 +140,7 @@ class Stack:
         self.fake = self.lt.run(FakeBrowser().start())
         self._saved = {k: getattr(proxy, k) for k in
                        ("UPSTREAM", "LISTEN", "LOG", "STATE", "REG", "UP", "STAGE", "INNER_PORT",
-                        "STAGE_ACTIVATE_APP", "HUMANS")}
+                        "STAGE_ACTIVATE_APP", "HUMANS", "REC")}
         proxy.HUMANS = proxy.Humans()       # no human activity carried over between tests
         # Never bring a real window forward from a test run.
         proxy.STAGE_ACTIVATE_APP = False
@@ -219,6 +222,8 @@ class Stack:
             self.run(self._stop())
         finally:
             self.lt.stop()
+            if self.proxy.REC is not None and self.proxy.REC is not self._saved.get("REC"):
+                self.proxy.REC.stop()
             for k, v in self._saved.items():
                 setattr(self.proxy, k, v)
 

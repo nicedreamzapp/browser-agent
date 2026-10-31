@@ -48,6 +48,8 @@ class FakeBrowser:
         self.page_events = {}        # targetId -> [[t, kind]] the in-page listener has recorded
         self.watchers = {}           # targetId -> [page sockets that added the broker's binding]
         self.visible = set()         # targetIds whose document.visibilityState reads "visible"
+        self.snapshots = {}          # targetId -> what the Broker Recorder's page snapshot reads back
+        self.screenshot = None       # PNG bytes Page.captureScreenshot returns
 
     # ---- test helpers ----------------------------------------------------
     def add_human_tab(self, url="https://mail.example.com/inbox", title="Inbox"):
@@ -141,6 +143,9 @@ class FakeBrowser:
                 if m.get("method") == "Runtime.addBinding" and params.get("name") == "__bbHumanEvent":
                     channel = f"watch:{tid}"
                     self.watchers.setdefault(tid, []).append(ws)
+                # The Broker Recorder's own snapshot socket gets a channel of its own too.
+                if "__bbSnap" in str(params.get("expression", "")):
+                    channel = f"rec:{tid}"
                 self.calls.append((channel, m.get("method"), params))
                 await self._page_reply(ws, tid, m)
         finally:
@@ -151,7 +156,17 @@ class FakeBrowser:
         expr = (m.get("params") or {}).get("expression", "")
         if m.get("method") == "Page.navigate" and tid in self.targets:
             self.targets[tid]["url"] = (m.get("params") or {}).get("url", "")
-        if m.get("method") == "Runtime.evaluate" and "visibilityState" in expr and tid in self.targets:
+        if m.get("method") == "Runtime.evaluate" and "__bbSnap" in expr and tid in self.targets:
+            snap = dict(self.snapshots.get(tid) or {"els": [], "masks": []})
+            snap.setdefault("url", self.targets[tid]["url"])
+            snap.setdefault("title", self.targets[tid]["title"])
+            for k, v in (("vw", 1280), ("vh", 800), ("dpr", 1), ("sx", 0), ("sy", 0), ("focused", None)):
+                snap.setdefault(k, v)
+            result = {"result": {"type": "string", "value": json.dumps(snap)}}
+        elif m.get("method") == "Page.captureScreenshot" and self.screenshot is not None:
+            import base64
+            result = {"data": base64.b64encode(self.screenshot).decode()}
+        elif m.get("method") == "Runtime.evaluate" and "visibilityState" in expr and tid in self.targets:
             result = {"result": {"type": "string", "value": json.dumps(
                 {"visibility": "visible" if tid in self.visible else "hidden",
                  "human": self.page_events.get(tid, [])})}}

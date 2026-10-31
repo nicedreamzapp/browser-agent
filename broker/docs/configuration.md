@@ -25,6 +25,10 @@ reads, file by file.
 | `BROKER_STAGE_DWELL` | `20` | Seconds a page shown through the stage is protected from the next `/show`. |
 | `BROKER_STAGE_WAIT` | `30` | Seconds a `/show` caller queues before getting `409`. |
 | `BROWSER_APP` | `Brave Browser` | macOS app name the stage activates with `osascript` after showing a page. |
+| `BROKER_RECORD` | unset | `1` turns on the [Broker Recorder](trajectory-schema.md) for every job. Unset, only jobs that ask (`"record": true` on `/lease`, or `X-Broker-Record: 1` on a CDP websocket) are recorded. |
+| `BROKER_RECORD_DIR` | `~/.local/broker-recordings` | Where trajectories go. Created `0700`, files `0600`. Keep it out of cloud-synced folders. |
+| `BROKER_RECORD_SCREENSHOTS` | unset | `1` adds a half-scale PNG before each step, with every filled field, password field and iframe blacked out. |
+| `BROKER_RECORD_QUEUE` | `5000` | Events the recorder holds before it starts dropping (and counting) them. It never makes CDP traffic wait. |
 | `BROKER_DEBUG` | unset | Any non-empty value turns on Python `DEBUG` logging, which includes the `websockets` handshake trace. When unset, `websockets.server` handshake errors are silenced. |
 
 All ports bind to `127.0.0.1` only.
@@ -133,9 +137,10 @@ All bodies are JSON. Paths are matched by prefix.
 
 | Endpoint | Body | Reply |
 |---|---|---|
-| `POST /lease` | `{owner, url, purpose, ttl, hidden}` | `{lease_id, target_id, ws_url, expires_in}` |
+| `POST /lease` | `{owner, url, purpose, ttl, hidden, record, task}` | `{lease_id, target_id, ws_url, expires_in}` |
 | `POST /renew` | `{lease_id, ttl}` | `{lease_id, expires_in}`, or `404 {"error": "unknown lease"}` |
-| `POST /release` | `{lease_id}` | `{released}`, or `404` |
+| `POST /release` | `{lease_id, outcome, note}` | `{released}`, or `404` |
+| `POST /record` | `{lease_id or job, task, outcome, note}` | `{recording: true, job}`, or `{recording: false}` when that job is not being recorded |
 | `POST /show` | `{owner, url, purpose, wait, dwell}` | `{shown, target_id, held_for, owner}`; `409 {error, held_by, seconds_left, showing}` if busy; `400` without `url` |
 | `POST /unstage` | none | `{freed: true/false}` |
 | `POST /unshow` | `match` (owner or URL substring) | `{closed: [...], left_open: [...]}` |
