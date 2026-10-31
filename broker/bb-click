@@ -37,7 +37,7 @@ IDLE_NEEDED = 600
 
 
 def usage():
-    print(__doc__.split("\n\n")[1], file=sys.stderr)
+    print(__doc__.split("\n\n")[2], file=sys.stderr)
     sys.exit(1)
 
 
