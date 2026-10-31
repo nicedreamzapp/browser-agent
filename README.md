@@ -52,6 +52,8 @@ curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/br
 
 It restarts your browser once (Brave by default) so the broker can sit in front of it. Your profile, logins and open tabs come back. To use Chrome instead, run `curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/broker/get.sh | BROWSER_APP="Google Chrome" bash`.
 
+**Google Chrome 136 and newer:** Chrome ignores the debug port when it runs on your normal profile (a security change Google made in 2025), so the broker can't reach it. Brave doesn't have this limit, which is one reason it's the default. To use Chrome, give it its own profile folder by adding `--user-data-dir="$HOME/.chrome-agent"` to its launch flags, then sign in to the sites you want your agents to use once in that window.
+
 On Windows, paste this into PowerShell:
 
 ```powershell
@@ -209,7 +211,7 @@ pip3 install websockets websocket-client
 curl localhost:9223/status
 ```
 
-Python 3.9+. Brave is the default; for Chrome: `BROWSER_APP="Google Chrome" ./launch-browser.sh`. Already have something on 9222 you can't restart? Try it on another port first: `BROKER_PROXY_PORT=9224 BROKER_UPSTREAM_PORT=9222 BROKER_PORT=9225 python3 proxy.py`.
+Python 3.9+. Brave is the default; for Chrome: `BROWSER_APP="Google Chrome" ./launch-browser.sh`. Chrome 136+ also needs its own profile folder (`--user-data-dir`), see the note in Quick start. Already have something on 9222 you can't restart? Try it on another port first: `BROKER_PROXY_PORT=9224 BROKER_UPSTREAM_PORT=9222 BROKER_PORT=9225 python3 proxy.py`.
 
 **2. The agent.** Needs Apple Silicon (32 GB+ unified memory recommended), Python 3.12+, and the local MLX server from [claude-code-local](https://github.com/nicedreamzapp/claude-code-local):
 
