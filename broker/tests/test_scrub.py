@@ -82,9 +82,102 @@ def test_secret_looking_text_into_unknown_field_is_redacted(secret):
     assert text == scrub.REDACTED and red
 
 
-@pytest.mark.parametrize("plain", ["vaporizer coils", "hello", "Matt", "https://ineedhemp.com", "ineedhemp.com"])
-def test_plain_text_into_unknown_field_is_kept(plain):
-    assert scrub.scrub_typed(plain, None) == (plain, False)
+@pytest.mark.parametrize("plain", ["vaporizer coils", "hello", "https://ineedhemp.com", "ineedhemp.com"])
+def test_plain_text_into_a_known_trusted_field_is_kept(plain):
+    assert scrub.scrub_typed(plain, {"type": "search", "label": "Search"}, trusted=True) == (plain, False)
+
+
+@pytest.mark.parametrize("plain", ["vaporizer coils", "hello"])
+def test_any_text_into_an_unknown_or_untrusted_field_is_withheld(plain):
+    assert scrub.scrub_typed(plain, None) == (scrub.REDACTED, True)
+    assert scrub.scrub_typed(plain, {"type": "search", "label": "Search"}, trusted=False) == (scrub.REDACTED, True)
+
+
+# ---- review probes (2026-10-31) ---------------------------------------------------
+def test_probe_password_into_field_named_username_is_withheld():
+    # HIGH 1: a field's name can lie; looks_secret always runs
+    assert scrub.scrub_typed("Tr0ub4dor&3", {"fname": "username"}, trusted=True) == (scrub.REDACTED, True)
+
+
+@pytest.mark.parametrize("field", [{"fname": "code", "label": "Code"}, {"label": "Enter code"},
+                                   {"fname": "digit1"}, {"label": "6 digits"}, {"label": "Search"}])
+def test_probe_codes_are_withheld_whatever_the_field(field):
+    # HIGH 2: a bare "Code" field is sensitive, and 4-8 digits alone never pass
+    assert scrub.scrub_typed("482913", field, trusted=True) == (scrub.REDACTED, True)
+    assert scrub.scrub_typed("0042", field, trusted=True)[0] == scrub.REDACTED
+
+
+def test_probe_code_and_digit_names_are_sensitive():
+    assert scrub.is_sensitive_field({"fname": "code", "label": "Code"})
+    assert scrub.is_sensitive_field({"fname": "otp-digit-3"})
+    assert not scrub.is_sensitive_field({"label": "Coupon"})
+
+
+@pytest.mark.parametrize("code,gone", [
+    ("el.setAttribute('value','Tr0ub4dor&3')", "Tr0ub4dor&3"),
+    ("el.setAttribute('value', 'plain words here')", "plain words here"),
+    ("document.querySelector('#q').value = 'ruby twist'", "ruby twist"),
+    ("(el, v) => { el.value = v; }", None),
+    ("x = `hello ${name}`", "hello"),
+    ("document.querySelector('#Secret1').click()", None),
+])
+def test_probe_scrub_js_removes_every_literal_by_default(code, gone):
+    # HIGH 3: no keyword needed; only plain selector-call arguments survive
+    out = scrub.scrub_js(code)
+    if gone:
+        assert gone not in out, out
+    assert "'#q'" in scrub.scrub_js("document.querySelector('#q').value = 'x'")
+    assert "Secret" not in scrub.scrub_js("el.setAttribute('value','Secret1!')")
+
+
+def test_probe_scrub_js_sensitive_target_removes_selectors_too():
+    assert "#login" not in scrub.scrub_js("document.querySelector('#login').focus()", sensitive=True)
+
+
+@pytest.mark.parametrize("s,gone", [
+    ("Order total: $1,249.50 (paid)", "1,249.50"),
+    ("Refund of 39.99 USD issued", "39.99"),
+    ("Ship to: Jane Q. Doe, 4521 Westhaven Dr, Trinidad, CA 95570", "4521 Westhaven"),
+    ("Ship to: Jane Q. Doe", "Jane"),
+    ("123 Main Street Apt 4B", "123 Main Street"),
+    ("PO Box 1234, Arcata", "1234"),
+    ("Trinidad, CA 95570-1234", "95570"),
+    ("Tracking 1Z999AA10123456784", "1Z999AA10123456784"),
+    ("USPS 9400111899223197428490", "9400111899223197428490"),
+    ("Order #2062561234 shipped", "2062561234"),
+    ("ref 1234 5678 9012", "1234 5678 9012"),
+    ("Hi Melanie, your order is ready", "Melanie"),
+    ("Dear Mr Smith", "Smith"),
+    ("From: Corey Johnson <x>", "Corey"),
+    ("To: Lucky Yao", "Lucky"),
+    ("Thanks, Jeremiah", "Jeremiah"),
+])
+def test_probe_personal_data_in_names_titles_and_text(s, gone):
+    # MED 4: Gmail subjects and senders, Woo order pages
+    out = scrub.scrub_text(s)
+    assert gone not in out, out
+
+
+@pytest.mark.parametrize("url", ["https://mail.google.com/mail/u/0/#inbox", "https://www.paypal.com/myaccount",
+                                 "https://account.authorize.net/ui/themes/anet/merch.aspx",
+                                 "https://secure.chase.com/web/auth", "https://onlinebanking.example.com/",
+                                 "https://www.mybank.com/", "https://accounts.google.com/signin",
+                                 "https://voice.google.com/u/0/messages", "https://custom.example.org/x"])
+def test_probe_private_hosts(url):
+    assert scrub.host_denied(url, ["custom.example.org"])
+
+
+@pytest.mark.parametrize("url", ["https://ineedhemp.com/product/ruby-twist/", "https://www.google.com/search?q=x",
+                                 "https://github.com/nicedreamzapp", "about:blank", ""])
+def test_ordinary_hosts_are_not_private(url):
+    assert not scrub.host_denied(url)
+
+
+def test_screenshot_host_allowlist():
+    assert scrub.host_allowed("https://shop.example.com/x", ["example.com"])
+    assert scrub.host_allowed("https://example.com/", ["example.com"])
+    assert not scrub.host_allowed("https://evilexample.com/", ["example.com"])
+    assert not scrub.host_allowed("https://example.com/", [])
 
 
 def test_typed_text_masks_email_and_phone_in_ordinary_field():
@@ -136,7 +229,7 @@ def test_scrub_text_removes(s, gone):
 
 
 @pytest.mark.parametrize("s", [
-    "Add to cart", "Ruby Twist ceramic heater - $129.99", "Order placed on 2026-10-31 at 3:15 PM",
+    "Add to cart", "Ruby Twist ceramic heater", "Order placed on 2026-10-31 at 3:15 PM",
     "how-to-clean-maintain-your-vaporizer-make-your-heater-last-a-year", "Sign in", "Page 2 of 14",
 ])
 def test_scrub_text_keeps_ordinary_text(s):

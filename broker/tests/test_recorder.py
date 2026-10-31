@@ -356,7 +356,7 @@ def test_png_blackout_refuses_what_it_cannot_rewrite():
 
 def test_screenshot_is_saved_with_fields_blacked_out(rec_stack):
     stack, make = rec_stack
-    rec = make(screenshots=True)
+    rec = make(screenshots=True, screenshot_hosts=["shop.example.com"])
     stack.fake.screenshot = make_png(40, 30, (255, 255, 255, 255), 1)
     _, lease = http("POST", stack.api_base + "/lease", {"owner": "a"})
     tid = lease["target_id"]
@@ -425,3 +425,164 @@ def test_export_to_sft_and_stats(rec_stack, tmp_path, capsys):
     s = json.loads(capsys.readouterr().out)
     assert s["jobs"] == 1 and s["outcomes"] == {"success": 1} and s["redacted_steps"] == 1
     assert s["by_action"] == {"click": 3, "type": 2} and s["samples_exportable"] == 4
+
+
+# ---- review probes (2026-10-31) -------------------------------------------------------
+def finish(stack, rec, lease):
+    http("POST", stack.api_base + "/release", {"lease_id": lease["lease_id"]})
+    assert stack.wait_for(lambda: not rec.worker.jobs, 5) and rec.flush()
+    _, lines = read_jobs(rec)[lease["lease_id"]]
+    return [x for x in lines if x["type"] == "step"]
+
+
+def test_probe_typing_into_a_stale_target_is_withheld(rec_stack):
+    """HIGH 1: the snapshot says e1 is focused, but a step ran since; the text may have gone anywhere."""
+    stack, make = rec_stack
+    rec = make()
+    _, lease = http("POST", stack.api_base + "/lease", {"owner": "a"})
+    tid = lease["target_id"]
+    stack.fake.snapshots[tid] = login_page(focused="e1")
+    wait_obs(stack, rec, tid)
+    c = stack.page_client(tid)
+    c.call("Input.dispatchKeyEvent", type="keyDown", key="Tab")      # focus moves; the snapshot is now stale
+    c.call("Input.insertText", text="ruby twist")
+    steps = finish(stack, rec, lease)
+    typed = [x for x in steps if x["action"]["type"] == "type"][0]
+    assert typed["observation_stale"] and typed["action"]["text"] == scrub.REDACTED
+
+
+def test_probe_typing_into_a_freshly_focused_field_is_kept(rec_stack):
+    stack, make = rec_stack
+    rec = make()
+    _, lease = http("POST", stack.api_base + "/lease", {"owner": "a"})
+    tid = lease["target_id"]
+    stack.fake.snapshots[tid] = login_page(focused="e1")
+    wait_obs(stack, rec, tid)
+    c = stack.page_client(tid)
+    c.call("Input.insertText", text="ruby twist")
+    typed = finish(stack, rec, lease)[0]
+    assert typed["action"]["text"] == "ruby twist" and typed["target"]["name"] == "Email"
+
+
+def test_probe_typing_long_after_the_snapshot_is_withheld(rec_stack, monkeypatch):
+    stack, make = rec_stack
+    monkeypatch.setattr(recorder, "TRUST_SECS", 0.0)
+    rec = make()
+    _, lease = http("POST", stack.api_base + "/lease", {"owner": "a"})
+    tid = lease["target_id"]
+    stack.fake.snapshots[tid] = login_page(focused="e1")
+    wait_obs(stack, rec, tid)
+    c = stack.page_client(tid)
+    c.call("Input.insertText", text="ruby twist")
+    assert finish(stack, rec, lease)[0]["action"]["text"] == scrub.REDACTED
+
+
+def test_probe_js_literals_are_gone_without_any_keyword(rec_stack):
+    """HIGH 3."""
+    stack, make = rec_stack
+    rec = make()
+    _, lease = http("POST", stack.api_base + "/lease", {"owner": "a"})
+    c = stack.page_client(lease["target_id"])
+    c.call("Runtime.evaluate", expression="el.setAttribute('value','Tr0ub4dor&3')")
+    c.call("Runtime.callFunctionOn", functionDeclaration="function(){ this.title = 'Jane Doe 707'; }",
+           arguments=[{"value": "hunter2"}])
+    finish(stack, rec, lease)
+    t = all_text(rec)
+    assert "Tr0ub4dor" not in t and "Jane" not in t and "hunter2" not in t
+
+
+def test_probe_private_host_records_only_the_action_and_role(rec_stack):
+    """MED 4: on Gmail nothing but what was done and to which kind of element."""
+    stack, make = rec_stack
+    rec = make(screenshots=True, screenshot_hosts=["mail.google.com"])
+    stack.fake.screenshot = make_png(8, 8)
+    _, lease = http("POST", stack.api_base + "/lease", {"owner": "a"})
+    tid = lease["target_id"]
+    stack.fake.snapshots[tid] = {
+        "url": "https://mail.google.com/mail/u/0/#inbox/FMfcgzQXJWDsKmlQ", "title": "Inbox (3) - matt - Gmail",
+        "focused": "e1", "masks": [],
+        "els": [{"id": "e0", "tag": "tr", "role": "row", "name": "Corey Johnson Re: my heater order 4521",
+                 "box": [0, 100, 800, 30]},
+                {"id": "e1", "tag": "div", "role": "textbox", "name": "Message Body", "box": [0, 300, 800, 200],
+                 "field": True, "type": "contenteditable", "filled": True}]}
+    wait_obs(stack, rec, tid)
+    assert rec.worker.obs[tid]["shot"] is None            # never a screenshot of a private host
+    c = stack.page_client(tid)
+    click(c, [0, 100, 800, 30])
+    c.call("Input.insertText", text="Hi Corey, thanks")
+    c.call("Page.navigate", url="https://mail.google.com/mail/u/0/#sent?compose=abc")
+    steps = finish(stack, rec, lease)
+    t = all_text(rec)
+    for gone in ("Corey", "heater", "Inbox", "FMfcg", "compose", "Message Body", "thanks"):
+        assert gone not in t, gone
+    assert [x["action"]["type"] for x in steps] == ["click", "type", "navigate"]
+    assert steps[0]["target"]["role"] == "row" and "name" not in steps[0]["target"]
+    assert steps[0]["url"] == "https://mail.google.com/" and steps[0]["title"] is None
+    assert steps[1]["action"]["redacted"] and "text" not in steps[1]["action"]
+    assert all(x["action"]["private_host"] for x in steps)
+
+
+def test_probe_no_screenshot_without_an_allowlist(rec_stack):
+    """MED 5: BROKER_RECORD_SCREENSHOTS=1 alone takes no screenshots."""
+    stack, make = rec_stack
+    rec = make(screenshots=True)
+    assert rec.screenshot_hosts == []
+    stack.fake.screenshot = make_png(8, 8)
+    _, lease = http("POST", stack.api_base + "/lease", {"owner": "a"})
+    tid = lease["target_id"]
+    stack.fake.snapshots[tid] = login_page()
+    wait_obs(stack, rec, tid)
+    stack.page_client(tid).call("Page.reload")
+    assert finish(stack, rec, lease)[0]["screenshot"] is None
+    assert "Page.captureScreenshot" not in stack.fake.methods(f"rec:{tid}")
+
+
+def test_probe_snapshot_is_capped_and_skipped_when_nothing_changed(rec_stack):
+    """MED 6: the walk stops at MAX_WALK nodes, and an unchanged page is not walked again."""
+    assert "WALK = %d" % recorder.MAX_WALK in recorder.snapshot_js() and recorder.MAX_WALK == 2000
+    assert "PREV = null" in recorder.snapshot_js() and 'PREV = "a|b"' in recorder.snapshot_js("a|b")
+    stack, make = rec_stack
+    rec = make()
+    _, lease = http("POST", stack.api_base + "/lease", {"owner": "a"})
+    tid = lease["target_id"]
+    page = login_page()
+    page["sig"] = "SIG-1"
+    stack.fake.snapshots[tid] = page
+    wait_obs(stack, rec, tid)
+    first = rec.worker.obs[tid]
+    stack.fake.snapshots[tid] = {"same": True, "sig": "SIG-1"}
+    stack.page_client(tid).call("Page.reload")
+    assert stack.wait_for(lambda: rec.worker.obs[tid]["t"] > first["t"], 5)
+    assert rec.worker.obs[tid]["raw"] is first["raw"]               # reused, not re-walked
+    exprs = [p.get("expression", "") for ch, m, p in stack.fake.calls if ch == f"rec:{tid}"]
+    assert any('PREV = "SIG-1"' in e for e in exprs)
+    finish(stack, rec, lease)
+
+
+def test_probe_disk_sweep_keeps_14_days_and_the_size_cap(tmp_path):
+    """LOW 7."""
+    root = tmp_path / "rec"
+    now = time.mktime(time.strptime("2026-10-31 12:00", "%Y-%m-%d %H:%M"))
+    for day, size in (("2026-10-01", 10), ("2026-10-18", 10), ("2026-10-20", 600), ("2026-10-25", 600),
+                      ("2026-10-31", 600)):
+        (root / day).mkdir(parents=True)
+        (root / day / "j.jsonl").write_bytes(b"x" * size)
+    (root / "not-a-day").mkdir()
+    assert recorder.sweep(str(root), 14, 10 ** 9, now) == ["2026-10-01"]      # older than 14 days
+    assert recorder.sweep(str(root), 14, 1300, now) == ["2026-10-18", "2026-10-20"]   # oldest first, to the cap
+    assert sorted(os.listdir(root)) == ["2026-10-25", "2026-10-31", "not-a-day"]
+    assert recorder.sweep(str(root), 14, 1, now) == ["2026-10-25"]             # never today
+
+
+def test_probe_worker_never_touches_pending_ids(rec_stack):
+    """LOW 8: only the proxy's event loop changes rec.pending; it still drains."""
+    stack, make = rec_stack
+    rec = make()
+    _, lease = http("POST", stack.api_base + "/lease", {"owner": "a"})
+    c = stack.page_client(lease["target_id"])
+    c.call("Input.dispatchKeyEvent", type="rawKeyDown", key="a")   # recordable, but not a step
+    c.call("Input.insertText", text="x")
+    assert rec.flush()
+    assert all(not ids for ids in rec.pending.values())
+    import inspect
+    assert "self.rec.pending" not in inspect.getsource(recorder._Worker)

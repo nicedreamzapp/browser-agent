@@ -48,6 +48,11 @@ TYPE_GAP = 2.5        # keystrokes further apart than this start a new "type" st
 HUMAN_GAP = 2.0       # the human's same-kind events closer than this are one step
 REPLY_WAIT = 15       # a command with no reply by then is written without a result
 MAX_ELEMENTS = 150
+MAX_WALK = 2000       # DOM nodes a snapshot looks at, at most
+TRUST_SECS = float(os.environ.get("BROKER_RECORD_TRUST_SECS", 5))   # typed text is kept only into a field
+                      # clicked, or seen focused in a fresh snapshot, this recently
+KEEP_DAYS = int(os.environ.get("BROKER_RECORD_KEEP_DAYS", 14))
+MAX_BYTES = int(float(os.environ.get("BROKER_RECORD_MAX_MB", 2048)) * 1024 * 1024)
 
 # ---------------------------------------------------------------------------
 # which CDP commands are steps (everything else is never recorded at all)
@@ -108,10 +113,21 @@ def _iso(t):
 # black out: every filled field, every password field, every iframe (a payment
 # or captcha frame cannot be looked into).
 SNAPSHOT_JS = r"""/*__bbSnap*/(() => {
-  const MAX = %d;
+  const MAX = %d, WALK = %d, PREV = __PREV_SIG__;
   const clean = (s, n) => (s || '').replace(/\s+/g, ' ').trim().slice(0, n || 80);
   const vw = innerWidth, vh = innerHeight;
   const ae = document.activeElement;
+  // Cheap signature first: when nothing a step could change has changed, skip the walk.
+  const all = document.getElementsByTagName('*').length;
+  let filledN = 0, fi = 0;
+  for (const f of document.querySelectorAll('input, textarea, select')) {
+    if (++fi > WALK) break;
+    if (f.value) filledN++;
+  }
+  const sig = [location.href, document.title, all, Math.round(scrollX), Math.round(scrollY), vw, vh,
+               ae ? (ae.tagName + '#' + ae.id + '@' + (ae.getAttribute('name') || '')) : '', filledN].join('|');
+  if (PREV && PREV === sig) return JSON.stringify({same: true, sig: sig});
+  let walked = 0, truncated = false;
   const implicit = (el) => {
     const t = el.tagName.toLowerCase(), ty = (el.type || '').toLowerCase();
     if (t === 'a') return 'link';
@@ -158,6 +174,7 @@ SNAPSHOT_JS = r"""/*__bbSnap*/(() => {
   const box = (r) => [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)];
   const masks = [];
   for (const el of document.querySelectorAll('input, textarea, select, [contenteditable=""], [contenteditable="true"], iframe')) {
+    if (++walked > WALK) { truncated = true; break; }
     const ty = (el.type || '').toLowerCase();
     if (ty === 'hidden') continue;
     const r = el.getBoundingClientRect();
@@ -169,7 +186,9 @@ SNAPSHOT_JS = r"""/*__bbSnap*/(() => {
   const sel = 'a[href], button, input, select, textarea, summary, iframe, [role], [contenteditable=""], [contenteditable="true"], [tabindex]:not([tabindex="-1"]), h1, h2, h3, img[alt]';
   const els = [];
   let focused = null;
+  walked = 0;
   for (const el of document.querySelectorAll(sel)) {
+    if (++walked > WALK) break;
     const ty = (el.type || '').toLowerCase();
     if (ty === 'hidden') continue;
     const r = el.getBoundingClientRect();
@@ -202,17 +221,25 @@ SNAPSHOT_JS = r"""/*__bbSnap*/(() => {
     focused = els[els.length - 1].id;
   }
   return JSON.stringify({url: location.href, title: document.title, vw: vw, vh: vh, dpr: devicePixelRatio,
-                         sx: Math.round(scrollX), sy: Math.round(scrollY), focused: focused, els: els, masks: masks});
-})()""" % MAX_ELEMENTS
+                         sx: Math.round(scrollX), sy: Math.round(scrollY), focused: focused, els: els, masks: masks,
+                         masks_truncated: truncated, sig: sig});
+})()""" % (MAX_ELEMENTS, MAX_WALK)
 
 
-def element_view(e):
-    """One snapshot element as written: never a value, never raw attribute names."""
+def snapshot_js(prev_sig=None):
+    """The snapshot expression; with the last snapshot's signature it answers {"same": true} cheaply."""
+    return SNAPSHOT_JS.replace("__PREV_SIG__", json.dumps(prev_sig) if prev_sig else "null")
+
+
+def element_view(e, private=False):
+    """One snapshot element as written: never a value, never raw attribute names.
+    On a private host, no name either: role, tag and box only."""
     if not e:
         return None
     out = {"node": e.get("id"), "role": str(e.get("role") or e.get("tag") or "")[:30],
-           "tag": str(e.get("tag") or "")[:20], "name": scrub.scrub_text(e.get("name") or "", 80),
-           "box": e.get("box")}
+           "tag": str(e.get("tag") or "")[:20], "box": e.get("box")}
+    if not private:
+        out["name"] = scrub.scrub_text(e.get("name") or "", 80)
     if e.get("field"):
         out["input_type"] = str(e.get("type") or "")[:20]
         out["sensitive"] = scrub.is_sensitive_field(e)
@@ -223,14 +250,17 @@ def element_view(e):
     return out
 
 
-def observation_view(raw):
-    """The compact snapshot written with a step."""
+def observation_view(raw, private=False):
+    """The compact snapshot written with a step. On a private host: the host, the
+    elements' roles and boxes, and nothing else (no path, no title, no names)."""
     if not raw:
         return None
-    return {"url": scrub.scrub_url(raw.get("url")), "title": scrub.scrub_text(raw.get("title") or "", 200),
+    return {"url": host_only(raw.get("url")) if private else scrub.scrub_url(raw.get("url")),
+            "title": None if private else scrub.scrub_text(raw.get("title") or "", 200),
             "viewport": [raw.get("vw"), raw.get("vh")], "scroll": [raw.get("sx"), raw.get("sy")],
             "focused": raw.get("focused"),
-            "elements": [element_view(e) for e in (raw.get("els") or [])[:MAX_ELEMENTS]]}
+            "elements": [element_view(e, private) for e in (raw.get("els") or [])[:MAX_ELEMENTS]],
+            **({"private_host": True} if private else {})}
 
 
 def hit_test(raw, x, y):
@@ -412,11 +442,41 @@ def semantic(method, p):
     return None, None
 
 
-def safe_action(a, target):
-    """The written form of an action. Built field by field; nothing raw is copied."""
+def host_only(url):
+    """scheme://host/ and nothing else, for a private host."""
+    try:
+        from urllib.parse import urlsplit
+        p = urlsplit(url or "")
+        return f"{p.scheme}://{p.hostname}/" if p.hostname else None
+    except ValueError:
+        return None
+
+
+def safe_action(a, target, trusted=True, private=False):
+    """The written form of an action. Built field by field; nothing raw is copied.
+
+    `trusted`: the target is known to be where the text went (clicked or seen focused
+    in a fresh snapshot moments before). `private`: the page is on a denylisted host,
+    so only the action itself is written, with no text of any kind."""
     t = a["type"]
     out = {"type": t, "method": a.get("method")}
     redacted = False
+    if private:
+        if t in ("click", "scroll"):
+            for k in ("x", "y", "dx", "dy", "count"):
+                if isinstance(a.get(k), (int, float)):
+                    out[k] = round(a[k], 1)
+        elif t == "key":
+            out["key"] = str(a.get("key"))[:20]
+            out["modifiers"] = a.get("modifiers") or []
+        elif t in ("navigate", "open_tab"):
+            out["url"] = host_only(a.get("url"))
+        elif t == "upload":
+            out["count"] = len(a.get("files") or [])
+        if t in ("type", "set_value", "js", "select", "upload"):
+            out["redacted"] = True
+        out["private_host"] = True
+        return {k: v for k, v in out.items() if v is not None}
     if t in ("navigate", "open_tab"):
         out["url"] = scrub.scrub_url(a.get("url"))
     elif t == "history":
@@ -432,8 +492,7 @@ def safe_action(a, target):
         out["key"] = str(a.get("key"))[:20]
         out["modifiers"] = a.get("modifiers") or []
     elif t in ("type", "set_value"):
-        sens = target if target is not None else None
-        text, changed = scrub.scrub_typed(a.get("text") or "", sens)
+        text, changed = scrub.scrub_typed(a.get("text") or "", target, trusted)
         out["text"] = text
         redacted = text == scrub.REDACTED          # the whole thing withheld
         if changed and not redacted:
@@ -446,9 +505,9 @@ def safe_action(a, target):
         out["files"] = [scrub.scrub_text(n, 80) for n in names[:10]]
         out["count"] = len(names)
     elif t in ("js", "select"):
-        force = target is not None and scrub.is_sensitive_field(target)
+        sens = target is not None and scrub.is_sensitive_field(target)
         code = a.get("code") or ""
-        out["code"] = scrub.scrub_js(code, 2000, force_literals=force)
+        out["code"] = scrub.scrub_js(code, 2000, force_literals=True, sensitive=sens)
         out["args"] = a.get("args", 0)
         redacted = out["code"] != code[:2000]
     if redacted:
@@ -461,11 +520,17 @@ def safe_action(a, target):
 # ---------------------------------------------------------------------------
 class Recorder:
     def __init__(self, upstream_port, out_dir=None, all_jobs=True, screenshots=None,
-                 queue_max=QUEUE_MAX, log=None, start=True):
+                 queue_max=QUEUE_MAX, log=None, start=True, screenshot_hosts=None,
+                 keep_days=KEEP_DAYS, max_bytes=MAX_BYTES):
         self.upstream_port = upstream_port            # callable: proxy.UPSTREAM may change
         self.dir = os.path.expanduser(out_dir or os.environ.get("BROKER_RECORD_DIR") or DEFAULT_DIR)
         self.all_jobs = all_jobs
         self.screenshots = (os.environ.get("BROKER_RECORD_SCREENSHOTS") == "1") if screenshots is None else screenshots
+        # Screenshots only on hosts named here (comma-separated); empty means none at all.
+        self.screenshot_hosts = [h for h in (screenshot_hosts if screenshot_hosts is not None else
+                                 os.environ.get("BROKER_RECORD_SCREENSHOT_HOSTS", "").split(",")) if h.strip()]
+        self.deny_hosts = [h for h in os.environ.get("BROKER_RECORD_DENY_HOSTS", "").split(",") if h.strip()]
+        self.keep_days, self.max_bytes = keep_days, max_bytes
         self.flagged = set()
         self.q = queue.Queue(queue_max)
         self.dropped = 0
@@ -656,6 +721,7 @@ class _Worker:
         self.refresh = {}          # target id -> pending refresh task
         self.loop = None
         self.errors = 0
+        self.last_sweep = 0
 
     # ---- plumbing ---------------------------------------------------------------
     def run(self):
@@ -776,8 +842,8 @@ class _Worker:
         method = m.get("method")
         a, need = semantic(method, m.get("params"))
         if a is None:
-            if m.get("id") is not None:
-                self.rec.pending.get(conn, set()).discard(m.get("id"))
+            # Its id stays in rec.pending until the reply passes; only the proxy's event
+            # loop ever changes rec.pending, so there is nothing to race with.
             return
         a["method"] = method
         if method == "Target.createTarget" and result:
@@ -786,18 +852,22 @@ class _Worker:
         o = self.obs.get(tid) if tid else None
         raw = o["raw"] if o else None
         target = None
+        stale = bool(o and self.last_step.get(tid, 0) > o["t"])
+        trusted = False
         if need == "point" and raw is not None:
             target = hit_test(raw, a.get("x", 0), a.get("y", 0))
         elif need == "focus":
             lc = self.last_click.get(tid)
-            if lc and t - lc[0] < 5 and lc[1] and lc[1].get("field"):
-                target = lc[1]
+            if lc and t - lc[0] < TRUST_SECS and lc[1] and lc[1].get("field"):
+                target, trusted = lc[1], True      # the field it clicked moments ago
             elif raw is not None:
                 target = focused_element(raw)
+                # focused in a snapshot taken after the last step, moments ago
+                trusted = target is not None and not stale and t - o["t"] < TRUST_SECS
         if a["type"] == "click" and tid:
             self.last_click[tid] = (t, target)
         d = {"t": t, "seq": seq, "job": key, "tid": tid, "action": a, "target": target,
-             "obs": o, "stale": bool(o and self.last_step.get(tid, 0) > o["t"]), "conn": conn}
+             "obs": o, "stale": stale, "trusted": trusted, "conn": conn}
         if refused is not None:
             self._finish(d, {"message": refused, "by": "broker"}, t)
         elif result is not None or m.get("id") is None:
@@ -883,6 +953,14 @@ class _Worker:
                 self.cmds.pop(k, None)
                 d["no_reply"] = True
                 self._finish(d, None, now)
+        if now - self.last_sweep > 86400:
+            self.last_sweep = now
+            try:
+                gone = sweep(self.rec.dir, self.rec.keep_days, self.rec.max_bytes, now)
+                if gone:
+                    self.rec.log(f"recorder: removed {len(gone)} old recording day(s): {', '.join(gone)}")
+            except Exception as e:
+                self.rec.log(f"recorder: sweep failed ({type(e).__name__}: {e})")
 
     # ---- observations -------------------------------------------------------------
     def _schedule(self, tid, delay):
@@ -907,19 +985,33 @@ class _Worker:
         if c is None:
             c = self.conns[tid] = _PageConn(f"ws://127.0.0.1:{self.rec.upstream_port()}/devtools/page/{tid}")
         t = time.time()
+        prev = self.obs.get(tid)
+        prev_sig = (prev or {}).get("raw", {}).get("sig") if prev else None
         try:
-            res = await c.call("Runtime.evaluate", {"expression": SNAPSHOT_JS, "returnByValue": True}, 4)
+            res = await c.call("Runtime.evaluate", {"expression": snapshot_js(prev_sig), "returnByValue": True}, 4)
             raw = json.loads((res.get("result") or {}).get("value") or "null")
         except Exception:
             self.conns.pop(tid, None)
             await c.close()
             return
+        if isinstance(raw, dict) and raw.get("same") and prev is not None:
+            # Nothing a step could change has changed: the last snapshot stands, as of now.
+            self.obs[tid] = dict(prev, t=t)
+            return
         if not isinstance(raw, dict) or not isinstance(raw.get("els"), list):
             return
         o = {"raw": raw, "t": t, "shot": None}
-        if self.rec.screenshots:
+        if self.rec.screenshots and self._shot_allowed(raw):
             o["shot"] = await self._screenshot(c, raw)
         self.obs[tid] = o
+
+    def _shot_allowed(self, raw):
+        """Screenshots only on an explicitly allowed host, never a private one, never
+        when the mask walk was cut short (a field could be left unmasked)."""
+        url = raw.get("url") or ""
+        return (scrub.host_allowed(url, self.rec.screenshot_hosts)
+                and not scrub.host_denied(url, self.rec.deny_hosts)
+                and not raw.get("masks_truncated"))
 
     async def _screenshot(self, c, raw):
         """A PNG of the viewport with every filled field, password field and iframe
@@ -932,7 +1024,7 @@ class _Worker:
                 "clip": {"x": raw.get("sx", 0), "y": raw.get("sy", 0), "width": raw.get("vw", 0),
                          "height": raw.get("vh", 0), "scale": scale}}, 8)
             data = base64.b64decode(res.get("data") or "")
-            again = await c.call("Runtime.evaluate", {"expression": SNAPSHOT_JS, "returnByValue": True}, 4)
+            again = await c.call("Runtime.evaluate", {"expression": snapshot_js(), "returnByValue": True}, 4)
             raw2 = json.loads((again.get("result") or {}).get("value") or "null")
             if not isinstance(raw2, dict) or raw2.get("masks") != raw.get("masks") \
                     or (raw2.get("sx"), raw2.get("sy")) != (raw.get("sx"), raw.get("sy")):
@@ -973,19 +1065,24 @@ class _Worker:
         self._open(j)
         a = d["action"]
         target = d.get("target")
-        if actor == "human":
-            action = {"type": a["type"], "count": a.get("count", 1), "event": a.get("event")}
-        else:
-            action = safe_action(a, target)
-        if action.get("redacted"):
-            j.redacted += 1
         o = d.get("obs")
         raw = o["raw"] if o else None
-        obs = observation_view(raw)
+        deny = self.rec.deny_hosts
+        private = bool((raw and scrub.host_denied(raw.get("url"), deny))
+                       or (a.get("type") in ("navigate", "open_tab") and scrub.host_denied(a.get("url"), deny)))
+        if actor == "human":
+            action = {"type": a["type"], "count": a.get("count", 1), "event": a.get("event")}
+            if private:
+                action["private_host"] = True
+        else:
+            action = safe_action(a, target, d.get("trusted", False), private)
+        if action.get("redacted"):
+            j.redacted += 1
+        obs = observation_view(raw, private)
         rec = {"type": "step", "schema": SCHEMA, "job": _safe_name(j.key), "seq": d["seq"],
                "ts": _iso(d["t"]), "t": round(d["t"], 3), "tab": (d["tid"] or "")[:12], "actor": actor,
                "url": obs["url"] if obs else None, "title": obs["title"] if obs else None,
-               "action": action, "target": element_view(target)}
+               "action": action, "target": element_view(target, private)}
         if obs is not None:
             h = hashlib.sha1(json.dumps(obs, sort_keys=True).encode()).hexdigest()
             if h == j.last_obs_hash and j.last_obs_seq is not None:
@@ -997,7 +1094,7 @@ class _Worker:
             rec["observation_stale"] = bool(d.get("stale"))
         else:
             rec["observation"] = None
-        shot = o.get("shot") if o else None
+        shot = o.get("shot") if o and not private else None
         if shot:
             rel = os.path.join(os.path.basename(os.path.dirname(j.path)),
                                os.path.splitext(os.path.basename(j.path))[0], f"{d['seq']}.png")
@@ -1047,6 +1144,50 @@ class _Worker:
         for tid in list(j.tabs):
             self.tab_job.pop(tid, None)
         self.jobs.pop(key, None)
+
+
+_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def sweep(root, keep_days, max_bytes, now=None):
+    """Delete recording days older than `keep_days`, then the oldest days until the
+    whole folder is under `max_bytes`. Today is never deleted. Only YYYY-MM-DD
+    folders directly under `root` are touched. Returns the days removed."""
+    import shutil
+    now = now or time.time()
+    if not os.path.isdir(root):
+        return []
+    today = datetime.fromtimestamp(now).strftime("%Y-%m-%d")
+    cutoff = datetime.fromtimestamp(now - keep_days * 86400).strftime("%Y-%m-%d")
+    days = sorted(d for d in os.listdir(root) if _DAY.match(d) and os.path.isdir(os.path.join(root, d))
+                  and not os.path.islink(os.path.join(root, d)))
+    gone = []
+    for d in days:
+        if d < cutoff and d != today:
+            shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+            gone.append(d)
+    days = [d for d in days if d not in gone]
+
+    def size(d):
+        total = 0
+        for dp, _, fs in os.walk(os.path.join(root, d)):
+            for f in fs:
+                try:
+                    total += os.lstat(os.path.join(dp, f)).st_size
+                except OSError:
+                    pass
+        return total
+    sizes = {d: size(d) for d in days}
+    total = sum(sizes.values())
+    for d in days:
+        if total <= max_bytes:
+            break
+        if d == today:
+            continue
+        shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+        total -= sizes[d]
+        gone.append(d)
+    return gone
 
 
 def _get(q, timeout):
