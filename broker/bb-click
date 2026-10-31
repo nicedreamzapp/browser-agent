@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""bb-click: press a button the way a person does, in a tab you already hold.
+
+Matt (2026-10-31, after an agent gave up on Apple's forum setup in a hidden tab):
+"you can easily take a screenshot, pinpoint exactly where it is on the screen,
+and press the button within 10 seconds."
+
+    bb-click <owner> "<text or css selector>"      find it, trusted click at its center
+    bb-click <owner> 640,410                        trusted click at viewport CSS pixels
+    bb-click --js <owner> "<text>"                  script click first, trusted retry if nothing moves in 3 s
+    bb-click --visible [--matt-ok] <owner> "<text>" redo the step in a visible bb-show tab
+    bb-click --check <owner>                        is this tab stuck (blank, 401/403, signed out)?
+
+It screenshots the tab, finds the element's box (scrolled into view), sends a
+TRUSTED mouse click (Input.dispatchMouseEvent: moved, pressed, released), waits,
+screenshots again and prints what changed: URL, title, DOM, new tab, HTTP errors.
+Works in hidden lease tabs; nothing is brought to the front.
+
+--visible takes the human's screen, so it runs only with --matt-ok (the human said
+take over) or when he has not touched the machine for 10+ minutes. The visible
+tab is owned by "<owner>-visible": close it with bb-close <owner>-visible.
+
+Exit 0 clicked and the page reacted · 2 clicked, nothing changed · 3 no such tab or
+element · 4 the human is working in that tab (wait, re-read with bb-peek) ·
+5 stuck: see the message (try --visible) · 6 --visible refused (the human is
+active and did not say take over) · 1 error / broker down.
+"""
+import json, os, sys
+from urllib.error import HTTPError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import broker_client as bc  # noqa: E402
+
+IDLE_NEEDED = 600
+
+
+def usage():
+    print(__doc__.split("\n\n")[1], file=sys.stderr)
+    sys.exit(1)
+
+
+def find_tab(owner):
+    """The open tab of `owner` (a lease or a shown job): its full target id, url and kind."""
+    with urlopen(bc.BROKER + "/peek?" + urlencode({"match": owner, "chars": 0}), timeout=30) as r:
+        tabs = json.load(r)["tabs"]
+    mine = [t for t in tabs if t.get("leased_by") == owner or owner in (t.get("shown_by") or [])
+            or t.get("child_owner") == owner or (len(owner) >= 8 and (t.get("target_id") or "").startswith(owner))]
+    return mine[0] if mine else None
+
+
+class Attached:
+    """A page socket on `owner`'s tab. A REST lease is attached directly; a shown job tab
+    is leased as itself (rule 1, no copy) and that lease is released after, leaving it open."""
+
+    def __init__(self, owner, info):
+        self.lease_id = None
+        tid = info.get("target_id") or ""
+        try:
+            self.tab = bc.Tab(f"ws://127.0.0.1:{_port()}/devtools/page/{tid}")
+            self.tab.eval("1")             # the proxy closes a socket on a tab that is not in its lease list
+        except Exception:
+            g = bc._post("/lease", {"owner": owner, "url": info.get("url"), "purpose": "bb-click", "ttl": 120})
+            if g.get("target_id") != tid:      # it opened a new tab instead: give it back
+                bc._post("/release", {"lease_id": g["lease_id"]})
+                raise LookupError(f"could not attach to {owner}'s tab {tid[:12]}")
+            self.lease_id = g["lease_id"]
+            self.tab = bc.Tab(g["ws_url"])
+
+    def close(self):
+        self.tab.close()
+        if self.lease_id:
+            try:
+                bc._post("/release", {"lease_id": self.lease_id})
+            except Exception:
+                pass
+
+
+def _port():
+    return os.environ.get("BROKER_CDP_PORT", "9222")
+
+
+def target_of(s):
+    parts = s.replace(" ", "").split(",")
+    if len(parts) == 2:
+        try:
+            return (float(parts[0]), float(parts[1]))
+        except ValueError:
+            pass
+    return s
+
+
+def report(r):
+    el = r.get("element") or {}
+    print(f"clicked ({r['how']}) at {r.get('x', '?')},{r.get('y', '?')}"
+          + (f" on <{el.get('tag')}> \"{el.get('text', '')}\"" if el.get("tag") else ""))
+    if el.get("covered_by"):
+        print(f"  note: a <{el['covered_by']}> sits on top of it at that point (overlay or cookie banner?)")
+    for c in r["changed"] or ["nothing changed in %ss" % r["seconds"]]:
+        print("  " + c)
+    for e in r["http_errors"]:
+        print(f"  http {e['status']}: {e['url']}")
+    for s in r.get("shots") or []:
+        if s:
+            print("  screenshot: " + s)
+    st = r.get("stuck")
+    if st:
+        print("STUCK: " + "; ".join(st["why"]))
+        print("  " + st["fix"])
+        return 5
+    return 0 if r["changed"] else 2
+
+
+def main(argv):
+    flags = {a for a in argv if a.startswith("--")}
+    args = [a for a in argv if not a.startswith("--")]
+    if not args or (len(args) < 2 and "--check" not in flags):
+        usage()
+    owner = args[0]
+    try:
+        info = find_tab(owner)
+    except Exception as e:
+        print(f"broker not answering: {e}", file=sys.stderr)
+        return 1
+    if not info:
+        print(f"no open tab belongs to {owner}. Lease or bb-show it first.", file=sys.stderr)
+        return 3
+    if (info.get("human") or {}).get("active"):
+        print("the human is working in that tab right now. Not clicking. Re-read it with bb-peek and continue "
+              "from what it shows.", file=sys.stderr)
+        return 4
+
+    if "--check" in flags:
+        a = Attached(owner, info)
+        try:
+            st = a.tab.stuck_check()
+        finally:
+            a.close()
+        if st:
+            print("STUCK: " + "; ".join(st["why"]) + "\n  " + st["fix"])
+            return 5
+        print("not stuck: page has content, no 401/403, no sign-in prompt")
+        return 0
+
+    target = target_of(" ".join(args[1:]))
+    if "--visible" in flags:
+        idle = bc.human_idle_seconds()
+        if "--matt-ok" not in flags and (idle is None or idle < IDLE_NEEDED):
+            print(f"not taking the screen: the human was active {idle and round(idle)}s ago and did not say take "
+                  f"over. Ask him in one line, then rerun with --matt-ok.", file=sys.stderr)
+            return 6
+        vowner = owner + "-visible"
+        try:
+            bc.show(info["url"], owner=vowner, purpose="bb-click --visible redo of a stuck hidden step")
+        except bc.HumanIsWorking as e:
+            print(str(e), file=sys.stderr)
+            return 4
+        except Exception as e:
+            print(f"could not show it: {e}", file=sys.stderr)
+            return 1
+        vinfo = find_tab(vowner)
+        if not vinfo:
+            print("the visible tab did not come up", file=sys.stderr)
+            return 1
+        owner, info = vowner, vinfo
+        print(f"redoing it in a visible tab ({vowner}); close it after with: bb-close {vowner}")
+
+    a = Attached(owner, info)
+    try:
+        label = owner
+        if "--js" in flags:
+            r = a.tab.click(target, shots=True, label=label)
+        else:
+            r = a.tab.click_trusted(target, label=label)
+    except LookupError as e:
+        print(str(e), file=sys.stderr)
+        return 3
+    except RuntimeError as e:
+        if "human is working" in str(e):
+            print(str(e), file=sys.stderr)
+            return 4
+        raise
+    finally:
+        a.close()
+    return report(r)
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except HTTPError as e:
+        print(f"broker refused: {e.code} {e.read()[:300]!r}", file=sys.stderr)
+        sys.exit(1)

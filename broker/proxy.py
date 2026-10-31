@@ -1045,7 +1045,7 @@ class Stage:
             info = (await self.up.send("Target.getTargetInfo", targetId=tid)).get("targetInfo", {})
         except Exception:
             pass
-        out = {"target": tid[:12], "url": info.get("url", ""), "title": info.get("title", ""),
+        out = {"target": tid[:12], "target_id": tid, "url": info.get("url", ""), "title": info.get("title", ""),
                "text": "", "fields": []}
         try:
             v = json.loads(await page_eval(tid, PEEK_JS % chars) or "{}")
@@ -1734,6 +1734,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._reply(200, s)
         if self.path.startswith("/health"):
             return self._reply(200, {"ok": True, "brave": self._run(UP.alive())})
+        if self.path.startswith("/human"):
+            # How long since the human last typed or clicked in ANY tab the broker watches.
+            # bb-click asks this (with the OS idle time) before it may take a step visibly.
+            last = max((HUMANS.last(t) or 0 for t in list(HUMANS.events)), default=0)
+            ago = round(time.time() - last, 1) if last else None
+            return self._reply(200, {"last_input_seconds_ago": ago, "tabs_watched": len(HUMANS.tasks)})
         if self.path.startswith("/stage"):
             return self._reply(200, STAGE.state())
         if self.path.startswith("/peek"):

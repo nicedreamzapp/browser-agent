@@ -190,3 +190,36 @@ def test_show_body(scripted):
     broker_client.show("https://x", owner="o", purpose="p", wait=3, dwell=4)
     assert scripted.seen[-1] == ("/show", {"owner": "o", "url": "https://x", "purpose": "p",
                                           "wait": 3, "dwell": 4})
+
+
+def _bare_tab():
+    t = broker_client.Tab.__new__(broker_client.Tab)
+    t.target_id, t.events = "T" * 32, []
+    return t
+
+
+def test_stuck_check_names_401_and_session_mismatch(monkeypatch):
+    monkeypatch.setattr(broker_client, "_his_session", lambda url: "signed_in")
+    after = {"url": "https://developer.apple.com/forums/", "text_len": 900, "signed_out": True, "signed_in": False}
+    v = _bare_tab().stuck_check({"after": after, "new_tabs": [{"target": "x", "url": "about:blank"}],
+                                 "http_errors": [{"status": 401, "url": "https://x/api"}]})
+    assert any("401" in w for w in v["why"])
+    assert any("blank" in w for w in v["why"])
+    assert any("session mismatch" in w for w in v["why"])
+    assert "--visible" in v["fix"]
+
+
+def test_stuck_check_quiet_on_a_normal_page(monkeypatch):
+    monkeypatch.setattr(broker_client, "_his_session", lambda url: "signed_in")
+    after = {"url": "https://example.com/", "text_len": 900, "signed_out": False, "signed_in": True}
+    assert _bare_tab().stuck_check({"after": after, "new_tabs": [], "http_errors": []}) is None
+
+
+def test_click_falls_back_to_trusted_when_js_click_does_nothing(monkeypatch):
+    t = _bare_tab()
+    before = {"state": {"url": "u", "title": "a"}, "children": {}, "t": time.time()}
+    monkeypatch.setattr(t, "_before", lambda shots, label: before)
+    monkeypatch.setattr(t, "eval", lambda expr: True)
+    monkeypatch.setattr(t, "_after", lambda *a: {"changed": [], "seconds": 3})
+    monkeypatch.setattr(t, "click_trusted", lambda *a, **k: {"changed": ["page changed"], "how": "trusted"})
+    assert t.click("Get started")["how"] == "js->trusted"

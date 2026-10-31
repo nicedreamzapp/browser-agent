@@ -6,11 +6,23 @@ rule, so the next agent doesn't pay for the same lesson.
 
 ## Driving any tab
 
-- **Background tabs don't take real input.** A hidden (broker) tab isn't focused, so
-  `Input.insertText` and `Input.dispatchMouseEvent` often go nowhere. Fall back to
-  `element.click()` for buttons and to setting `.value` and firing `input`/`change`
-  events for fields. On a tab the person is looking at, real input (`Input.insertText`)
-  is the better choice, because many forms ignore values set from script.
+- **Click like a person: `bb-click <owner> "<text or selector>"`** (or `tab.click_trusted()`
+  in `broker_client`). It screenshots, finds the element's box, and sends a trusted
+  `Input.dispatchMouseEvent` press and release at its center, then screenshots again and
+  prints what changed (URL, title, DOM, new tab, HTTP errors). Trusted mouse clicks DO land
+  in hidden tabs (tested 2026-10-31: `event.isTrusted` true in a hidden lease); only the
+  reply to `mouseMoved` lags about 5 s there, so the client sends it without waiting.
+  Many sites ignore `element.click()` (`isTrusted` false) or need a user gesture to open a
+  popup. `tab.click()` tries the script click first and retries trusted when nothing moves
+  in 3 s, logging a line to `broker/click.log`.
+- **Typing in hidden tabs:** `Input.insertText` often goes nowhere there. Set `.value` and
+  fire `input`/`change` events for fields. On a tab the person is looking at, real input
+  (`Input.insertText`) is the better choice, because many forms ignore values set from script.
+- **Stuck in a hidden tab (blank page, 401/403, Sign in link) while his own tab is signed
+  in:** `bb-click --check <owner>` says so plainly. Redo that one step visibly with
+  `bb-click --visible <owner> "<button>"`, allowed only with `--matt-ok` (he said take over)
+  or after he has been idle 10+ minutes; otherwise ask him in one line. Close the visible
+  tab with `bb-close <owner>-visible`.
 - **Look first, then fill, then read it back.** After filling, wait a couple of seconds
   and read every field again. Some forms re-render and silently wipe what you typed.
   Hand a page to the human only after the values have stuck.
@@ -167,6 +179,15 @@ Rules for the list:
   no upload field. The page only says "Your request has been sent", and the Case-ID
   arrives within about a minute in an email from dts-help@apple.com. Reply in that
   thread with the zipped project (max 50 MB, about 250 source lines).
+- **Developer Forums first-time setup** (`developer.apple.com/forums`, then your profile):
+  the first post asks for Forums Setup: pick a public username (shown on every post, not
+  your Apple ID name), accept the forums agreement, and save the profile page. On
+  2026-10-31 a hidden lease tab got stuck on the profile step: "Get started" opened a
+  blank page and "Remind me later" returned 401, and the hidden tab's forum session read
+  signed out while Matt's visible tab read signed in. One click on Get started in a
+  VISIBLE tab worked. The earlier clicks were script clicks, not trusted input. Use
+  `bb-click` (trusted) first; if it still shows blank/401, that step needs a visible tab:
+  `bb-click --visible --matt-ok <owner> "Get started"` once he says take over.
 - **Signing over SSH on the mini fails** with `errSecInternalComponent` (locked login
   keychain). Let automatic signing there register the bundle ID and capability, then
   sign on a Mac with an unlocked keychain using a manual profile made through the ASC API.

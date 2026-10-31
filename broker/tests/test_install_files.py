@@ -22,7 +22,7 @@ def test_shell_scripts_parse(script):
     assert p.returncode == 0, p.stderr
 
 
-@pytest.mark.parametrize("path", ["bb-show", "bb-close", "bb-peek", "get.sh", "install.sh", "launch-browser.sh",
+@pytest.mark.parametrize("path", ["bb-show", "bb-close", "bb-peek", "bb-click", "get.sh", "install.sh", "launch-browser.sh",
                                   "brave-cdp-guard.sh", "uninstall.sh"])
 def test_scripts_are_executable_in_git(path):
     # ROOT may be a subfolder of the checkout (broker/ inside browser-agent), so ask git
