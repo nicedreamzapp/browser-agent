@@ -21,10 +21,12 @@ for cand in "$BROKER_PYTHON" /usr/bin/python3 "$(command -v python3)"; do
 done
 [ -n "$PY" ] || { echo "could not get websockets>=13 into any python3; set BROKER_PYTHON=/path/to/python3" >&2; exit 1; }
 echo "using $PY"
-# Port overrides (BROKER_PROXY_PORT / BROKER_UPSTREAM_PORT / BROKER_PORT) go into the plist,
+# Port overrides (BROKER_PROXY_PORT / BROKER_UPSTREAM_PORT / BROKER_PORT) and the recorder
+# switches (BROKER_RECORD...) go into the plist,
 # because launchd does not pass your shell's environment to the agent.
 ENV_XML=""
-for v in BROKER_PROXY_PORT BROKER_UPSTREAM_PORT BROKER_PORT BROWSER_APP; do
+for v in BROKER_PROXY_PORT BROKER_UPSTREAM_PORT BROKER_PORT BROWSER_APP \
+         BROKER_RECORD BROKER_RECORD_DIR BROKER_RECORD_SCREENSHOTS; do
   val="${!v:-}"
   [ -n "$val" ] && ENV_XML="$ENV_XML<key>$v</key><string>$val</string>"
 done

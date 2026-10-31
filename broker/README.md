@@ -296,6 +296,10 @@ Python 3.9+. `proxy.py` needs [`websockets`](https://github.com/python-websocket
 
 Localhost only, no auth. Anything that can reach `127.0.0.1:9223` can drive your logged-in browser — which is already true of `127.0.0.1:9222` the moment you enable remote debugging. Don't expose either.
 
+### 🎞️ Broker Recorder (opt-in): every job becomes training data
+
+Off by default. With `BROKER_RECORD=1` (or `"record": true` on one `/lease`, or `X-Broker-Record: 1` on one CDP websocket), each job is written to `~/.local/broker-recordings` as a JSONL trajectory: semantic actions (navigate, click, type, key, scroll, select, upload, js), the element acted on, a compact snapshot of the page before the step, the result, and whether the agent or the human did it. Passwords, card and one-time-code fields, cookies, auth headers, tokens in URLs, emails and phones are scrubbed before anything touches disk, and recording runs on its own thread so CDP traffic never waits for it. `python3 record_export.py -o train.jsonl` turns recordings into SFT data for small vision models. Schema, scrubbing rules and known gaps: [docs/trajectory-schema.md](docs/trajectory-schema.md).
+
 <a name="status"></a>
 ### <a name="status"></a>📊 Status
 

@@ -60,6 +60,7 @@ nav:
   - Quickstart: quickstart.md
   - Configuration: configuration.md
   - How it works: how-it-works.md
+  - Trajectory recorder: trajectory-schema.md
   - Troubleshooting: troubleshooting.md
   - FAQ: faq.md
   - Changelog: changelog.md

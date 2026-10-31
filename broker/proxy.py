@@ -55,6 +55,9 @@ from websockets.asyncio.server import serve as ws_serve
 from websockets.http11 import Response
 from websockets.datastructures import Headers
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import recorder   # noqa: E402  the Broker Recorder; inert unless BROKER_RECORD=1 or a job asks
+
 UPSTREAM = int(os.environ.get("BROKER_UPSTREAM_PORT", 9229))   # the real browser
 LISTEN = int(os.environ.get("BROKER_PROXY_PORT", 9222))          # what tools dial
 API = int(os.environ.get("BROKER_PORT", 9223))                   # REST lease API
@@ -93,6 +96,19 @@ GENUINE = ("pointerdown", "keydown", "paste")   # inputs only a person makes; th
 CHURN_WINDOW = int(os.environ.get("BROKER_CHURN_WINDOW", 600))  # seconds an open/close cycle is remembered
 CHURN_LIMIT = int(os.environ.get("BROKER_CHURN_LIMIT", 2))      # cycles allowed before "stop and ask"
 PORT_GRACE = 8                     # seconds a restarting proxy waits for the old one to let go
+# The Broker Recorder (2026-10-31): off unless BROKER_RECORD=1 (every job) or a client
+# asks for its own job (POST /lease {"record": true}, or X-Broker-Record: 1 on a CDP
+# websocket). While REC is None, none of the recording code below runs.
+REC = None
+
+
+def _recorder(flag=False):
+    """The recorder, made on first use when one job asks to be recorded and BROKER_RECORD is off."""
+    global REC
+    if REC is None and flag:
+        REC = recorder.Recorder(lambda: UPSTREAM, all_jobs=False, log=log)
+        log("recorder: on for the jobs that ask (BROKER_RECORD is off)")
+    return REC
 
 
 def log(msg):
@@ -423,6 +439,8 @@ class Registry:
         if info is None:
             return False
         self._save()
+        if REC is not None:
+            REC.tab_gone(tid, why)
         kids_closed, kids_left = [], []
         try:
             if STAGE is not None and STAGE.job_of(tid):
@@ -501,6 +519,8 @@ class Registry:
         for tid in gone:
             self.tabs.pop(tid, None)
             HUMANS.forget(tid)
+            if REC is not None:
+                REC.tab_gone(tid, "tab vanished")
         if gone:
             self._save()
         for tid in [c for c in self.children if c not in live]:
@@ -676,6 +696,8 @@ class Humans:
         ev.append((t, kind))
         ev.sort()
         del ev[:-100]
+        if REC is not None:
+            REC.human(tid, t, kind)
         return True
 
     def merge(self, tid, events):
@@ -1454,6 +1476,17 @@ async def _page_session(client, tid):
         info["attached"] -= 1
         await client.close(1011, f"browser unreachable: {e}")
         return
+    job = recorder.job_key(info, tid)
+    hdr = client.request.headers
+    rec = _recorder(hdr.get("X-Broker-Record") == "1")
+    if rec is not None and hdr.get("X-Broker-Record") == "1":
+        rec.flag(job)
+    if rec is not None and not rec.wants(job):
+        rec = None
+    conn = object()
+    if rec is not None:
+        rec.job(job, owner=owner, task=unquote(hdr.get("X-Broker-Task") or "") or info.get("purpose"),
+                kind=info["kind"], tab=tid)
 
     async def c2u(raw):
         try:
@@ -1467,6 +1500,8 @@ async def _page_session(client, tid):
             await client.send(json.dumps(out))
             return None
         no = await agent_gate(tid, m.get("method"), m.get("params"))
+        if rec is not None:
+            rec.command(conn, job, tid, m, refused=no)
         if no:
             out = {"id": m.get("id"), "error": {"code": -32000, "message": "browser-broker: " + no}}
             if "sessionId" in m:
@@ -1476,8 +1511,11 @@ async def _page_session(client, tid):
         return raw
 
     try:
-        await asyncio.gather(_pump(client, up, c2u), _pump(up, client))
+        await asyncio.gather(_pump(client, up, c2u),
+                             _pump(up, client, rec.reply_hook(conn) if rec is not None else None))
     finally:
+        if rec is not None:
+            rec.conn_closed(conn)
         info = REG.tabs.get(tid)
         if info is not None:
             info["attached"] -= 1
@@ -1500,6 +1538,18 @@ async def _browser_session(client):
     seen = set()         # every target this client was ever shown, so it hears when they close
     contexts = set()     # browser contexts this client created; disposed when it leaves
     log(f"browser client {owner} connected")
+    hdr = client.request.headers
+    rec_ = _recorder(hdr.get("X-Broker-Record") == "1")
+    if rec_ is not None and hdr.get("X-Broker-Record") == "1":
+        rec_.flag(owner)
+    if rec_ is not None and not rec_.wants(owner):
+        rec_ = None
+    if rec_ is not None:
+        rec_.job(owner, owner=owner, task=unquote(hdr.get("X-Broker-Task") or "") or None, kind="ws")
+
+    def rec(tid, m, refused=None, result=None):
+        if rec_ is not None:
+            rec_.command(client, owner, tid, m, refused=refused, result=result)
 
     def mine(tid):
         return tid in REG.tabs and REG.tabs[tid]["owner"] == owner
@@ -1592,6 +1642,7 @@ async def _browser_session(client):
                 await reply(m, error={"code": -32000, "message": "Failed to find browser context with id " + str(ctx)})
                 return None
             tid = await make(p.get("url"), ctx)
+            rec(tid, m, result={"targetId": tid})
             if ctx:
                 REG.tabs[tid]["context"] = ctx
             if auto_attach["on"]:
@@ -1629,6 +1680,7 @@ async def _browser_session(client):
                 return None
             if method == "Target.closeTarget":
                 no = await agent_gate(tid, method, p)
+                rec(tid, m, refused=no, result=None if no else {"success": True})
                 if no:
                     await reply(m, error={"code": -32000, "message": "browser-broker: " + no})
                     return None
@@ -1639,6 +1691,7 @@ async def _browser_session(client):
             pass    # allowed; auto-attach events are filtered below
         if m.get("sessionId") in sessions:
             no = await agent_gate(sessions[m["sessionId"]], method, p)
+            rec(sessions[m["sessionId"]], m, refused=no)
             if no:
                 await reply(m, error={"code": -32000, "message": "browser-broker: " + no})
                 return None
@@ -1650,6 +1703,8 @@ async def _browser_session(client):
         except Exception:
             return raw
         method, p, sid = m.get("method"), m.get("params") or {}, m.get("sessionId")
+        if rec_ is not None and "id" in m:
+            rec_.reply_msg(client, m)
         if method == "Target.attachedToTarget":
             child, tid = p.get("sessionId"), (p.get("targetInfo") or {}).get("targetId")
             # nested under one of our sessions (OOPIF, worker) or one of our pages
@@ -1688,6 +1743,9 @@ async def _browser_session(client):
         await asyncio.gather(_pump(client, up, c2u), _pump(up, client, u2c))
     finally:
         await REG.release_owner(owner)
+        if rec_ is not None:
+            rec_.conn_closed(client)
+            rec_.end(owner, "client disconnected")
         for ctx in contexts:
             try:
                 await UP.send("Target.disposeBrowserContext", browserContextId=ctx)
@@ -1779,6 +1837,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                 i = REG.tabs[tid]
                 i["attached"] = 1          # a REST lease counts as held from grant
                 i["purpose"] = b.get("purpose")
+                rec = _recorder(bool(b.get("record")))
+                if rec is not None and b.get("record"):
+                    rec.flag(i["lease_id"])
+                if rec is not None and rec.wants(i["lease_id"]):
+                    rec.job(i["lease_id"], owner=owner, task=b.get("task") or b.get("purpose"),
+                            kind="rest", tab=tid)
                 return self._reply(200, {"lease_id": i["lease_id"], "target_id": tid,
                                          "ws_url": f"ws://127.0.0.1:{LISTEN}/devtools/page/{tid}",
                                          "expires_in": ttl, "shared_with_shown_job": bool(shared)})
@@ -1797,6 +1861,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                     return self._reply(400, {"error": "lease_id is required"})
                 for tid, i in list(REG.tabs.items()):
                     if i.get("lease_id") == b.get("lease_id"):
+                        if REC is not None and (b.get("outcome") or b.get("task")):
+                            REC.outcome(b["lease_id"], b.get("outcome"), b.get("task"), b.get("note"))
                         kids = {}
                         closed = self._run(REG.close(tid, "released", kids))
                         r = {"released": b["lease_id"], "tab_closed": bool(closed)}
@@ -1841,6 +1907,15 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if len(tgt) < 8 or not asked:
                     return self._reply(400, {"error": "need target (8+ chars of the tab id) and asked (Matt's words)"})
                 return self._reply(200, self._run(close_for_matt(tgt, asked)))
+            if self.path.startswith("/record"):
+                # The Broker Recorder: name a job's task or outcome (lease_id, or a ws:/pool- job id).
+                job = b.get("lease_id") or b.get("job")
+                if not job:
+                    return self._reply(400, {"error": "record needs lease_id or job"})
+                if REC is None or not REC.wants(job):
+                    return self._reply(200, {"recording": False})
+                REC.outcome(job, b.get("outcome"), b.get("task"), b.get("note"))
+                return self._reply(200, {"recording": True, "job": job})
             if self.path.startswith("/unstage"):
                 return self._reply(200, {"freed": STAGE.free()})
             if self.path.startswith("/adopt"):
@@ -1924,7 +1999,7 @@ def _claim_ports():
 
 
 async def main():
-    global REG, UP, STAGE, INNER_PORT
+    global REG, UP, STAGE, INNER_PORT, REC
     _claim_ports()
     UP = Upstream()
     try:
@@ -1935,6 +2010,9 @@ async def main():
         sys.exit(1)
     REG = Registry(UP)
     STAGE = Stage(UP)
+    REC = recorder.Recorder.from_env(lambda: UPSTREAM, log=log)
+    if REC is not None:
+        log(f"recorder: on for every job, writing to {REC.dir}")
     loop = asyncio.get_running_loop()
     ApiHandler.loop = loop
     api = ThreadingHTTPServer(("127.0.0.1", API), ApiHandler)

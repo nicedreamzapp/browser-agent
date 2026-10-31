@@ -11,6 +11,17 @@ description: >-
 The project has no tagged releases yet, so this list is grouped by commit date
 from the git history on `main`. Commit hashes link to GitHub.
 
+## 2026-10-31
+
+- **Broker Recorder (opt-in).** With `BROKER_RECORD=1`, or per job with `"record": true` on
+  `/lease` or `X-Broker-Record: 1` on a CDP websocket, every job becomes a JSONL trajectory in
+  `~/.local/broker-recordings`: semantic actions (navigate, click, type, key, scroll, select,
+  upload, js), the target element, a compact snapshot of the page before the step, the result,
+  and whether the agent or the human acted. Everything is scrubbed first (`scrub.py`):
+  sensitive fields, credentials, tokens, emails and phones never reach disk. Recording runs on
+  its own thread and never delays CDP traffic. `record_export.py` turns recordings into SFT
+  data for small vision models. See [the schema](trajectory-schema.md).
+
 ## 2026-10-23
 
 - **When the human helps: five rules, enforced in code.** After agents fought the human over
