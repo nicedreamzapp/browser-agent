@@ -2,7 +2,7 @@
 
 # browser-agent
 
-### The agent does the work. The broker makes it safe to share your real, logged-in browser with it.
+### Lets an AI agent use your real, logged-in browser like a careful person would, without taking over your screen.
 
 <a href="https://youtu.be/SIuMNa2k6Wc"><img src="https://img.youtube.com/vi/SIuMNa2k6Wc/maxresdefault.jpg" width="640" alt="Local AI browser agent demo"></a><br>
 <em>▶ Watch the agent demo on YouTube</em>
@@ -16,52 +16,119 @@
 
 </div>
 
-An AI agent is most useful in the browser you already use, the one where you are logged in to your email, your store and your accounts. That is also where it gets in your way. It grabs the tab you were reading. A second agent navigates the first one's tab out from under it. And when you step in to help, by typing in a form or solving a captcha, the agent does not notice: it reloads the page and wipes your work, then tries again.
+## What it is
 
-This repo is the two pieces that fix that, and they are built to work together:
+browser-agent lets an AI agent use the web browser you already use, where you are already signed in, the way a careful person would. It works in its own background tabs, so your screen stays yours.
 
-| | Part | What it does |
-|---|---|---|
-| 🌐 | **The agent** ([`agent.py`](agent.py)) | You type a task in plain English. A model running on your own Mac picks the steps, and the agent carries them out in your real Brave browser and your shell. No cloud APIs. |
-| 🚦 | **The broker** ([`broker/`](broker/)) | A small local proxy that owns the browser's debug port (9222). Each agent gets its own background tab in your real browser, cannot see your tabs or another agent's, and cannot pull a window in front of you. It notices when you are working in a tab and keeps every agent's hands off it until you stop. |
+**Who it is for:** people who want an AI helper for chores on websites they are already logged in to, and beginner or experienced developers who run AI agents in their everyday browser.
 
-The broker works with any tool that speaks the Chrome DevTools Protocol (Playwright, chrome-devtools-mcp, agent-browser, browser-use, raw websockets), not only this agent. The agent works without the broker too, but then it is one agent alone in your browser with nothing standing between it and your tabs.
+**Things it does:**
+
+- Fills out a privacy opt-out form on a people-search site, and notices if you step in to finish it yourself.
+- Goes through a webmail inbox in a background tab while you keep working in your own tabs.
+- Finds a news article and writes a comment on it, left as a draft for you to read. It does not post.
+- Looks something up on the web, saves it to a file on your Mac and can send a screenshot to your phone.
+- Lets two or three AI agents share one browser without bumping into each other or into you.
+
+It has two parts. **The broker** runs quietly in the background and gives every agent its own tab, kept apart from yours. It runs on Mac, Windows and Linux, and works with other AI browser tools too. **The agent** is an AI assistant that runs on your own Apple Silicon Mac with a local model. No cloud service is involved.
+
+## Why it's different
+
+- **It uses your real logins.** It works in your normal browser with your normal profile, so sites you are signed in to just work. There is no second, empty browser to sign in to again.
+- **It works in the background.** Each agent gets an ordinary background tab. The broker blocks the commands that would pull a tab or window in front of you. When an agent really needs to show you a page, it waits its turn in a queue (`bb-show`).
+- **It never reloads or closes a tab you are working in.** The broker notices real typing and clicking. While you have been active in a tab in the last 20 seconds, agent clicks and keystrokes there are refused, and nothing reloads or closes it.
+- **It clicks like a person and shows its work.** `bb-click` takes a screenshot, finds the button, sends a real mouse click at its center, takes another screenshot and says what changed. Many sites ignore clicks made by a script, so a script click that changes nothing in 3 seconds is retried as a real click.
+- **It knows when it is stuck.** `bb-click --check` says plainly when a background tab is blank, refused (401/403) or signed out. `--visible` redoes that one step in a tab you can see, but only if you said "take over" or have been away for 10 minutes.
+- **It stops and asks instead of looping.** If an agent opens and closes the same page twice in 10 minutes, the third try is refused and it is told to ask you what is wrong.
+- **It closes the tabs it opens.** When a job ends, its tabs close. Tabs you opened yourself are never closed by it.
+
+## Get started in 3 steps
+
+**1. Install.** On a Mac, paste this into Terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/broker/get.sh | bash
+```
+
+It restarts your browser once (Brave by default) so the broker can sit in front of it. Your profile, logins and open tabs come back. To use Chrome instead, run `curl -fsSL https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/broker/get.sh | BROWSER_APP="Google Chrome" bash`.
+
+On Windows, paste this into PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/nicedreamzapp/browser-agent/main/broker/windows/get.ps1 | iex
+```
+
+On Linux there is no one-line installer yet; see [Linux](#linux).
+
+**2. Check that it is running.**
+
+```bash
+curl localhost:9223/health
+```
+
+You should see `{"ok": true, "brave": true}`. That means the broker is up and can reach your browser (the field is called `brave` even when you use Chrome). On Windows, type `curl.exe http://127.0.0.1:9223/health`.
+
+**3. Try it.** On a Mac, show a page the way an agent would, then close it:
+
+```bash
+~/.browser-agent/broker/bb-show https://example.com my-first-try "just trying it out"
+~/.browser-agent/broker/bb-close my-first-try
+```
+
+`curl localhost:9223/status` (on Windows, `curl.exe http://127.0.0.1:9223/status`) shows which agent holds which tab at any moment. Any AI browser tool you already use keeps connecting to port 9222 as before; it now gets its own tabs.
+
+To run the agent itself on an Apple Silicon Mac, first set up the local model server from [claude-code-local](https://github.com/nicedreamzapp/claude-code-local), then run `browser-agent` (the installer puts it in `~/.local/bin`). Details are under [The agent](#the-agent).
+
+## Words you'll see
+
+- **CDP** (Chrome DevTools Protocol): the remote-control plug built into Chrome and Brave that lets a program drive the browser.
+- **Broker:** the small background program that stands between AI agents and your browser and decides who may touch which tab.
+- **Lease:** a tab lent to one agent for one job. Only that agent can use it, and it is closed when the job ends or the lease runs out.
+- **Hidden tab:** an ordinary background tab in your own window, behind the one you are looking at. Agents work there.
+- **Trusted click:** a click sent as real mouse input, which the page cannot tell apart from yours. A click made by page script is not trusted, and many sites ignore it.
+- **Owner name:** the name an agent gives its job, like `my-first-try` above. `bb-close` uses it to close that job's tabs.
+
+## For developers: full details
 
 **Contents:** [The problem](#the-problem) · [Five rules](#five-rules-and-how-they-are-enforced) · [Install](#install) · [The agent](#the-agent) · [The broker](#the-broker) · [Tests](#tests) · [Files](#files) · [Help and community](#something-not-working)
 
-## The problem
+The repo is two pieces built to work together. **The agent** ([`agent.py`](agent.py)): you type a task in plain English, a model running on your own Mac picks the steps, and the agent carries them out in your real Brave browser and your shell, with no cloud APIs. **The broker** ([`broker/`](broker/)): a small local proxy that owns the browser's debug port (9222), gives each agent its own background tab, keeps agents out of your tabs and each other's, and keeps their hands off a tab while you are working in it.
 
-### Agents fighting the person over the same tab
+The broker works with any tool that speaks the Chrome DevTools Protocol (Playwright, chrome-devtools-mcp, agent-browser, browser-use, raw websockets), not only this agent. The agent works without the broker too, but then it is one agent alone in your browser with nothing standing between it and your tabs.
+
+### The problem
+
+#### Agents fighting the person over the same tab
 
 On the night of October 22, 2026, agents fought the human over the same browser tab. An agent opened an opt-out form, started filling it in, closed the tab, opened it again and started over, more than ten times, right in front of him. When he stepped in to help, typing in the form or solving the captcha himself, the agent never noticed. It reloaded or re-showed the page and wiped his work, or opened the same link on top of the page he had just submitted. And it left the tabs open afterwards.
 
 We found four causes. The agent hopped between a hidden copy and a visible copy of the same page. Its fix for anything odd was to show the page again, and showing an already-open page reloaded it in place. Several agents acted in the browser at once, and one restarted the broker mid-task. And no agent ever read what the page showed right now, which is the only way to know what the human had already done.
 
-### Agents fighting each other
+#### Agents fighting each other
 
 If you have ever run a second browser agent and watched it **navigate a tab out from under the first one**, or reach for "the active tab" and grab the page *you* were reading, this is why. The Chrome DevTools Protocol has **no concept of ownership**. Every agent sees every tab, including yours, and none of them can tell that another one is already working in the tab it just grabbed. The usual advice is "run them on different ports," which means a different browser, which means losing the logins that made your real browser worth driving in the first place.
 
 The broker adds the missing layer: a process that owns the debug port and hands each agent an **exclusive lease** on its own tab. Nothing else changes. Your tools keep dialing port 9222 exactly as they do today.
 
-### Tabs left open
+#### Tabs left open
 
 Agents kept leaving tabs open after they finished their jobs. Every invoice, report and lookup they put up stayed there, and the tabs piled up in Matt's browser across all three machines (the M5, the mini and the Windows PC) until he had to keep asking for them to be cleared. The agent used to hold its tab for the whole interactive session, so a finished task's page sat there until you quit, and a page shown to the human with `bb-show` stayed open forever, because nothing in the tool ever closed it.
 
-## Five rules, and how they are enforced
+### Five rules, and how they are enforced
 
 Both halves keep the same five rules, each in code. The agent keeps them because it is written to; the broker enforces them from its side for every agent, including ones that were never written with these rules in mind. An agent does not have to remember them, and cannot talk its way around them.
 
 | Rule | How the agent keeps it | How the broker enforces it |
 |---|---|---|
 | **1. One tab per job.** | One broker lease per task: the same tab for the whole job, reconnects included. When a task stops to ask you something, the tab is kept, and your answer continues the job in that same tab instead of starting a new one. | The owner name an agent passes is its job. A job owns one tab, pinned to one site, until `bb-close`. Showing the same site again returns that same tab. Leasing a hidden tab on a site the job already shows returns the shown tab, and showing a site the agent already has a hidden tab on brings that tab forward. There is never a second copy to hop to. |
-| **2. Look before every step.** | [`look()`](agent.py#L745) reads the tab (URL, title, every filled-in field, passwords masked) before each model turn and again right before each click or keystroke. | `bb-show` of an open page brings it forward as it is and prints what it shows: URL, title, text, filled-in fields, and whether the human is working in it. `bb-peek` reads the same state without showing anything (passwords and card numbers masked), for any tab, including the human's own. |
+| **2. Look before every step.** | [`look()`](agent.py#L797) reads the tab (URL, title, every filled-in field, passwords masked) before each model turn and again right before each click or keystroke. | `bb-show` of an open page brings it forward as it is and prints what it shows: URL, title, text, filled-in fields, and whether the human is working in it. `bb-peek` reads the same state without showing anything (passwords and card numbers masked), for any tab, including the human's own. |
 | **3. Notice when the human helps.** | A listener records real keyboard and mouse input (`event.isTrusted`; the agent's own input is recognized and not counted). While you are typing or clicking in its tab, the agent pauses. When you stop, it tells the model exactly what you changed ("Email now holds ...", "the page moved to /success") and continues from there. It never goes back to a page you already moved past. | Every tab the broker opens or shows gets a small listener for real keyboard and mouse input (`event.isTrusted`, which page scripts cannot fake). Input the agent itself sends through the broker is recognized and not counted. While the human has been active in the last 20 seconds, agent clicks and keystrokes in that tab are refused, and a refused `bb-show` exits 4 and hands back what he has done so far, so the agent continues from there. |
 | **4. No reloading or closing mid-job.** | Navigating to the page it is already on is refused in code (that is a reload, and a reload wipes your work). When the broker refuses a reload, close or input in a tab you are working in, the agent waits instead of treating that as an error. | A page that is already open is never reloaded unless the caller passes `--reload`, and never while the human is working in it. A tab on screen for an open job cannot be reloaded, re-navigated to the same page or closed through the proxy. A tab the human is working in is never closed by anything: not `bb-close`, not a released or expired lease, not a disconnecting client, not a restarted broker. It is handed to him instead. |
 | **5. Stuck means ask, not retry.** | One failure gets one clearly different try. A second failure in a row, clicking the same thing three times, reopening a page after a failure, or running out of steps stops the task with one short question (also texted to your phone in mobile mode). The model can call `ask(question)` itself. | If the same job opens and closes (or reloads) the same page twice within 10 minutes, the third try is refused with HTTP 429 and `bb-show` exits 5 with one instruction: stop and ask the human in one line what is wrong. |
 
-### And close every tab you opened
+#### And close every tab you opened
 
-**The agent:** each task gets its own tab, and [`run`](agent.py#L1123) closes it in a `finally` the moment the task ends: done, out of steps, failed, or interrupted. Reconnects inside a task go back to the same tab instead of opening another. On exit, `atexit` plus SIGTERM/SIGHUP handlers close anything still open, and if the process is killed outright the broker lease expires and the broker closes the tab. Tabs you opened yourself are never touched.
+**The agent:** each task gets its own tab, and [`run`](agent.py#L1175) closes it in a `finally` the moment the task ends: done, out of steps, failed, or interrupted. Reconnects inside a task go back to the same tab instead of opening another. On exit, `atexit` plus SIGTERM/SIGHUP handlers close anything still open, and if the process is killed outright the broker lease expires and the broker closes the tab. Tabs you opened yourself are never touched.
 
 **The broker:** hidden work tabs are closed outright (not just released) when their lease is released, when its TTL runs out, or when a browser-level client disconnects, and `broker_client.lease()` releases on exit, exceptions included. A page put on your screen with `bb-show` stays there until something closes it, so `bb-show` reminds the caller every time, and `bb-close` closes it:
 
@@ -74,7 +141,7 @@ bb-close example.com/report    # or by any part of the page URL
 
 **The rule for any agent, this one or yours: close every tab you opened when the task is done.**
 
-### What it looks like
+#### What it looks like
 
 The agent, when you step in:
 
@@ -116,9 +183,9 @@ Every rule has its own tests on both sides: [`tests/test_five_rules.py`](tests/t
 
 One honest limit: a captcha inside a cross-site frame keeps its clicks to itself, so the broker counts the human's focus moving into that frame as activity rather than each click inside it.
 
-## Install
+### Install
 
-### macOS
+#### macOS
 
 **1. The broker** (one line). It relaunches your browser with remote debugging on a private port (9229, your real profile and logins, last session restored), then installs `proxy.py` as a LaunchAgent that owns 9222:
 
@@ -154,7 +221,7 @@ Or from your own clone: `pip install websockets` (the only third-party package `
 
 With the broker running, the agent leases its own background tab on its own (`BROKER_URL`, default `http://127.0.0.1:9223`). Without it, it falls back to raw CDP on 9222 and says so. Full setup, the launcher and settings are under [Setup and usage](#setup-and-usage).
 
-### Windows
+#### Windows
 
 **The broker** is verified on Windows 11 (Brave on Chromium 154, Python 3.14, logged-in real profile). One line in PowerShell clones this repo to `%USERPROFILE%\browser-agent` and runs the installer below (it does nothing if a broker already answers on 9223):
 
@@ -176,35 +243,33 @@ That installs the two Python dependencies, registers a Task Scheduler task `brow
 
 **The agent** is macOS only in practice: it needs the MLX server (Apple Silicon), and its launcher, screen capture and phone tools assume a Mac. It has not been tested on Windows.
 
-### Linux
+#### Linux
 
 The broker's proxy is pure Python. Start your browser with `--remote-debugging-port=9229 --remote-allow-origins=* --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`, then run `python3 broker/proxy.py` from a startup task. Isolation is verified on Ubuntu 26.04 / Chrome 153; see [Windows and Linux](#windows-and-linux).
 
-## The agent
-
-**What it does:** you type a task in plain English, a model running on your own Mac picks the steps, and the agent carries them out in your real Brave browser and your shell. The demo above shows it working end to end.
+### The agent
 
 An autonomous agent that runs entirely on Apple Silicon. It drives your real browser **and** your Mac. No cloud APIs, no Claude Code overhead, no MCP layer. Direct MLX inference + Chrome DevTools Protocol, plus a shell/file/media toolbelt for everything that isn't the web.
 
 > Started life as a pure browser agent. It has since grown a full system toolbelt (shell, files, screenshots, screen recording, send-to-phone), so it now handles end-to-end tasks like "find X on the web, run a script, and text me the result" in one session, all locally.
 
-### What I built
+#### What I built
 
 Matt Macosko wrote the agent itself, all of it in [`agent.py`](agent.py):
 
-- **The agent loop**: model call, JSON tool-call parsing (single call or a batch of up to 5), step limit, loop detection ([`run`](agent.py#L1123), [`parse_multi`](agent.py#L1096))
-- **A raw CDP client** with no Playwright or Selenium: connect, reconnect to the same tab, accessibility-tree snapshots, click, one-call typing, scroll, JS ([`class CDP`](agent.py#L718))
-- **The iframe + Shadow DOM comment drafter** that pierces cross-origin widgets like OpenWeb ([`post_comment`](agent.py#L911))
-- **A prompt-injection guard** in code that the model cannot switch off ([`guard_check`](agent.py#L465), notes at [line 332](agent.py#L332))
-- **The system toolbelt**: shell, file read/write, screenshots, send-to-phone, Studio Record control ([lines 29 to 247](agent.py#L29))
-- **Broker tab leasing** so several agents can share one browser ([`_broker_tab`](agent.py#L541))
-- **Working with the human**: look before every step, notice and adopt what you typed or clicked, never reload or reopen mid-job, and stop and ask when stuck ([the five rules](agent.py#L587))
+- **The agent loop**: model call, JSON tool-call parsing (single call or a batch of up to 5), step limit, loop detection ([`run`](agent.py#L1175), [`parse_multi`](agent.py#L1148))
+- **A raw CDP client** with no Playwright or Selenium: connect, reconnect to the same tab, accessibility-tree snapshots, click, one-call typing, scroll, JS ([`class CDP`](agent.py#L769))
+- **The iframe + Shadow DOM comment drafter** that pierces cross-origin widgets like OpenWeb ([`post_comment`](agent.py#L963))
+- **A prompt-injection guard** in code that the model cannot switch off ([`guard_check`](agent.py#L486), notes at [line 332](agent.py#L332))
+- **The system toolbelt**: shell, file read/write, screenshots, send-to-phone, Studio Record control ([lines 29 to 245](agent.py#L29))
+- **Broker tab leasing** so several agents can share one browser ([`_broker_tab`](agent.py#L566))
+- **Working with the human**: look before every step, notice and adopt what you typed or clicked, never reload or reopen mid-job, and stop and ask when stuck ([the five rules](agent.py#L638))
 
 And the broker, all of it in [`broker/`](broker/) (file by file under [The broker](#what-i-built-in-the-broker)).
 
 Upstream, not built here: [MLX](https://github.com/ml-explore/mlx) (Apple), the Gemma 4 model (Google DeepMind), the Chrome DevTools Protocol (Chromium), and the MLX server from the sibling [claude-code-local](https://github.com/nicedreamzapp/claude-code-local) repo. Full list in [CREDITS.md](CREDITS.md).
 
-### How it works
+#### How it works
 
 ```
 User prompt → Local LLM (MLX) → ┬─ Chrome DevTools Protocol → broker :9222 → your browser
@@ -218,7 +283,7 @@ User prompt → Local LLM (MLX) → ┬─ Chrome DevTools Protocol → broker :
 **Browser**: Brave with remote debugging on port 9222 (the broker's port when it is installed)
 **Protocol**: CDP WebSocket, no MCP. With the broker, the agent leases its own background tab and talks to it through the broker's proxy; without it, it connects to the browser directly.
 
-### Part of a local-first ecosystem
+#### Part of a local-first ecosystem
 
 This agent shares its brain and plumbing with a few sibling projects, all running on-device:
 
@@ -228,7 +293,7 @@ This agent shares its brain and plumbing with a few sibling projects, all runnin
 
 You don't need the whole ecosystem to run the agent (just the MLX server from claude-code-local), but it's built to compose with them.
 
-### Cross-origin iframe + Shadow DOM control
+#### Cross-origin iframe + Shadow DOM control
 
 Most news sites (Yahoo, etc.) load interactive widgets (e.g. OpenWeb/SpotIM comments) inside:
 1. A **cross-origin iframe** (JavaScript can't access it)
@@ -248,11 +313,11 @@ Input.insertText(text)                       # Types into the focused element
 
 This works because CDP operates at the **browser level**, not the page level. Same-origin policy doesn't apply. Because it drives your **real, logged-in Brave** over CDP (not a fresh Playwright profile), authenticated sites just work.
 
-### Tools
+#### Tools
 
 The model controls everything through JSON tool calls — one per turn, **or a batch**: it can return a JSON array of up to 5 calls that execute back-to-back on a single model turn (fill three fields, click submit — one think instead of four). After `navigate`/`click`/`type_text`/`scroll`, the fresh page state is attached to the result automatically (once per batch, after the last action), so it rarely needs a separate `snapshot`.
 
-#### Web
+##### Web
 - `navigate(url)` — go to a page
 - `snapshot()` — get the page's elements with UIDs (rarely needed; auto-attached after actions)
 - `click(uid)` — click an element by UID
@@ -260,42 +325,32 @@ The model controls everything through JSON tool calls — one per turn, **or a b
 - `scroll(direction)` — `"up"` / `"down"`
 - `js(code)` — run arbitrary JavaScript and return a value
 
-#### System
+##### System
 - `shell(cmd, timeout?)` — run any bash command (default cwd = `$HOME`). First choice for git, ssh, curl, wp-cli, python, npm, file ops — anything the terminal handles in one line
 - `read_file(path)` — read a file or list a directory (`~` expands)
 - `write_file(path, content)` — overwrite a file, creating parent dirs
 
-#### Media / send-to-phone
+##### Media / send-to-phone
 - `screenshot()` — capture the current Brave tab and text it
 - `fullscreen_shot()` — capture the whole Mac desktop (all displays) and text it
 - `send_image(url)` / `send_video(url)` — download a URL and text it
 - `record_start(mode)` — start Studio Record (`screen` / `face` / `screen_face`)
 - `record_stop()` — stop recording and auto-text the `.mp4`
 
-#### Control
+##### Control
 - `done(message)` — task complete (also used for conversational answers)
 
 The code also handles a `comment(text)` action (the iframe + Shadow DOM drafter above), but it is not listed in the model's tool prompt, so the model only uses it if it names it on its own.
 
-### Setup and usage
+#### Setup and usage
 
-#### Prerequisites
-- macOS with Apple Silicon (M-series), 32 GB+ unified memory recommended
-- Brave Browser (or Chrome) with remote debugging
-- Python 3.12+ with MLX
+You need macOS on Apple Silicon (32 GB+ unified memory recommended), Brave or Chrome with remote debugging, and Python 3.12+. `agent.py` itself imports only `websockets`; the MLX server needs `pip install mlx mlx-lm`.
 
-#### Install
-
-```bash
-pip install websockets        # the only third-party package agent.py imports
-pip install mlx mlx-lm        # for the MLX server from claude-code-local
-```
-
-#### MLX Server
+##### MLX Server
 
 The agent talks to a local MLX inference server that speaks Anthropic's Messages API. It ships with the companion repo **[claude-code-local](https://github.com/nicedreamzapp/claude-code-local)** — set that up first. Once installed, the server lives at `~/.local/mlx-native-server/server.py` and is auto-started by the desktop launcher.
 
-#### Launcher
+##### Launcher
 
 Double-click `Gemma 4 Browser.command` (from the claude-code-local repo's `launchers/Browser Agent.command`). It will:
 
@@ -306,7 +361,7 @@ Double-click `Gemma 4 Browser.command` (from the claude-code-local repo's `launc
 
 The media tools (`screenshot`, `record_*`, `send_*`) shell out to local helper scripts (`~/.claude/imessage-*.sh`, Studio Record on `127.0.0.1:17494`). They only send when the flag file `~/.claude/imessage-agent-on` exists; otherwise they return "mobile mode is off". They degrade gracefully — if a helper isn't present, that tool just reports it's unavailable; the rest of the agent runs fine.
 
-#### Settings (env vars read by `agent.py`)
+##### Settings (env vars read by `agent.py`)
 
 | Variable | Default | What it sets |
 |---|---|---|
@@ -317,9 +372,9 @@ The media tools (`screenshot`, `record_*`, `send_*`) shell out to local helper s
 | `BROWSER_AGENT_VISIBLE` | unset | set to `1` to ask browser-broker for a visible tab |
 | `MAX_STEPS` | `30` | model turns per task before it gives up |
 
-### Usage
+#### Usage
 
-#### Interactive Mode (recommended)
+##### Interactive Mode (recommended)
 ```bash
 python agent.py
 # Prompts: "What should I do?"
@@ -328,19 +383,19 @@ python agent.py
 # Errors in one task no longer kill the session — you get a message and a fresh prompt
 ```
 
-#### One-Shot Mode
+##### One-Shot Mode
 ```bash
 python agent.py "Find an article about Iran on Yahoo and draft a comment"
 python agent.py "cd into my site repo, run the build, and text me a screenshot when it's done"
 ```
 
-#### Swap Models
+##### Swap Models
 `agent.py` does not load a model. It sends requests to the MLX server at `MLX_URL`, and the server decides which model answers. Choose the model when you start the server from claude-code-local, for example:
 ```bash
 MLX_MODEL="lmstudio-community/Qwen3.8-27B-MLX-8bit"   # set in the server's environment, not the agent's
 ```
 
-### Example Tasks
+#### Example Tasks
 
 **Web + system in one go**
 ```
@@ -358,21 +413,21 @@ The agent navigates, finds the article, and reads it. When it drafts through the
 Show me which of my LaunchAgents failed to load and tail the last 20 lines of each one's log.
 ```
 
-### Reliability
+#### Reliability
 - **Batched actions, guarded** — a batch executes in order, stops at the first error (skipping the rest so a broken plan can't keep firing), and reports every action's result numbered so the model knows exactly how far it got.
 - **Auto-attached page state** — the fresh DOM is returned with each action result (once per batch), so the model doesn't waste turns re-snapshotting.
 - **Loop detection** — if the same UID is clicked a third time, the agent stops and asks you one question instead of trying again (see the five rules below).
 - **Error recovery** — any exception during a task (MLX timeout, CDP websocket drop, malformed output) is caught by the main loop; you get the error and a fresh prompt instead of a crash.
 
-### Safety: web pages can't give orders
-Page text is treated as data. These checks live in code ([`guard_check`](agent.py#L465)), so a page can't talk the model out of them:
+#### Safety: web pages can't give orders
+Page text is treated as data. These checks live in code ([`guard_check`](agent.py#L486)), so a page can't talk the model out of them:
 - Text a human can't see (tiny, transparent, off-screen, same colour as the background) and hidden buttons or fields are dropped from the snapshot.
 - Visible text that addresses an AI and gives an order is labelled untrusted.
 - After a page has been read, shell, file and phone tools only run if your task asked for that kind of work, and commands or files built from page text are refused.
 - Risky clicks (delete, buy, pay, send, post, sign in...) and password or card fields need the task to ask for them. Banking and payment sites must be named in the task. Text read on one site can't be sent to another.
 - `js()` can read the page but not send requests or change the page's location.
 
-### Performance
+#### Performance
 
 Two things are true at once: every individual browser action is near-instant, and a full task still takes tens of seconds — because the model reasons for 2–5s *between* each action. We profiled the whole pipeline against real pages (M-series Mac, isolated tab, warm cache) to find out exactly where the time goes.
 
@@ -398,12 +453,12 @@ Two things are true at once: every individual browser action is near-instant, an
 
 **That's exactly what batch mode attacks.** The model can return an array of up to 5 tool calls that execute in sequence on one turn. A fill-two-fields-and-submit sequence that used to cost three model thinks (~6–15 s) now costs one (~2–5 s). The safety rules keep it honest: element uids only exist for a page the model has already seen, so it's told never to batch a click/type against a page it hasn't loaded yet; an error mid-batch stops the remaining actions immediately and hands control back to the model with the numbered results; and the auto-snapshot runs once after the batch's last action instead of after every action.
 
-#### What got faster (and why)
+##### What got faster (and why)
 
 - **Typing is one call, not hundreds.** `type_text` used to dispatch a `keyDown`+`keyUp` pair for *every character* — 400 WebSocket round-trips to type a 200-char comment. It now sends the whole string in a single `Input.insertText`, with a one-key arrow nudge to wake up search-as-you-type/React listeners, and a per-character fallback for the rare field that rejects bulk insert. Works the same in plain inputs, textareas, and contenteditable/rich editors. Measured 117× faster.
 - **No more blind sleeps.** The fixed waits after `navigate`/`click`/`scroll` were trimmed hard (navigate settle 300→150 ms, scroll 500→150 ms, click 200→80 ms). Navigation still *polls* `readyState` for correctness — it just stops waiting the instant the page is genuinely ready instead of always sleeping the worst case.
 
-### Known limits
+#### Known limits
 
 - macOS only in practice: the media tools, launcher and screen capture assume a Mac, and the agent needs the separate MLX server running.
 - One model turn takes 2 to 5 seconds, so a full task takes tens of seconds (see Performance).
@@ -411,13 +466,13 @@ Two things are true at once: every individual browser action is near-instant, an
 - The `comment` drafter is tuned for OpenWeb/SpotIM-style widgets and falls back to the first text box on the page.
 - Phone features depend on your own helper scripts and Studio Record; without them those tools report they're off.
 
-## The broker
+### The broker
 
 **The broker is a local proxy that sits on Chrome's debug port (9222) and gives each AI agent its own private tab in your real, logged-in browser, so agents cannot see or steal each other's tabs or yours.** Its full reference, with every endpoint and setting, is [broker/README.md](broker/README.md), and the docs site source is in [broker/docs/](broker/docs/).
 
 Proof: the Linux isolation check in [browser-broker issue #1](https://github.com/nicedreamzapp/browser-broker/issues/1) (two clients, each blind to the other's tabs, checked in both directions), the stage timing run below, the manual test runs listed under [Status](#status), and the automated suite in [`broker/tests/`](broker/tests/), which CI runs on every push.
 
-### It is port 9222
+#### It is port 9222
 
 `proxy.py` takes 9222. Your real browser moves to 9229 behind it. Every tool keeps its existing command line and gets a browser in which **the only tabs that exist are the ones it was given**:
 
@@ -440,13 +495,13 @@ raw websockets, browser-use …      ┘
 
 Verified with Playwright's `connect_over_cdp`, a raw first-page websocket client, two concurrent browser-level clients, and the REST lease API: Gmail, LinkedIn and Yahoo Mail all loaded logged in, with the human's tabs untouched throughout.
 
-### Agent tabs are ordinary background tabs
+#### Agent tabs are ordinary background tabs
 
 Each agent's tab is an ordinary background tab in the window you already have open, behind what you are looking at. No second window, nothing parked off-screen, nothing headless: headless can't use the profile that has your logins, and a stray window just shoves yours aside. Isolation was never the window's job: the ownership registry and the swallowed focus commands do all of it.
 
 Those background tabs are why the browser is launched with the backgrounding flags above. Without them Chrome throttles a background tab's timers to roughly once a second, which is enough to mount zero rows in a modern SPA. What the flags do not do is make a hidden tab paint: `requestAnimationFrame` does not fire in a document whose `visibilityState` is `hidden`. A page that renders off timers or fetch callbacks fills in normally in an agent tab; a page that renders inside a rAF loop (canvas, animation-driven charts) sits at its initial frame. `Page.captureScreenshot` still returns a real PNG either way, so a screenshot is not proof the page is live.
 
-### Using it directly
+#### Using it directly
 
 ```python
 from broker_client import lease
@@ -465,7 +520,7 @@ The lease auto-renews while you work and releases on exit, including on an excep
 
 **It has a heartbeat.** One log line an hour. A silent daemon is indistinguishable from a dead one.
 
-### The stage
+#### The stage
 
 Everything above is about keeping agents out of your way. Sometimes one genuinely has something to show you, and that is the opposite problem.
 
@@ -487,7 +542,7 @@ C: HTTP 200 after 7.9s   waited, then shown
 
 `BROKER_STAGE_DWELL` (20s, how long a shown page is protected) and `BROKER_STAGE_WAIT` (30s, how long a caller queues) tune it. This is cooperative: it works because the polite path is one word shorter than the rude one. On a machine running Claude Code you can make it binding with a `PreToolUse` hook that denies `open -a <browser>` and points at `bb-show` instead; [`broker/hooks-example-focus-guard.py`](broker/hooks-example-focus-guard.py) is one (its shebang and log path are from the author's machine, so adjust them). If the broker is down, `bb-show` falls back to a plain `open -a`, which is macOS only.
 
-### API
+#### API
 
 | | |
 |---|---|
@@ -508,7 +563,7 @@ C: HTTP 200 after 7.9s   waited, then shown
 
 Everything is configured by environment: `BROKER_PROXY_PORT` (9222, what tools dial), `BROKER_UPSTREAM_PORT` (9229, your real browser), `BROKER_PORT` (9223, lease API), `BROKER_TTL`, `BROKER_HEARTBEAT`, `BROKER_LOG`, and `BROKER_DEBUG=1` for a handshake trace. Python 3.9+. `proxy.py` needs [`websockets`](https://github.com/python-websockets/websockets) (13 or newer, for `websockets.asyncio`); `broker_client.py` and `broker.py` need `websocket-client`. `install.sh` picks one Python (`/usr/bin/python3` first, or `BROKER_PYTHON`), makes sure it has both, and writes its full path into the LaunchAgent, because launchd does not see your shell's PATH.
 
-### Windows and Linux
+#### Windows and Linux
 
 `proxy.py`, `broker.py` and `broker_client.py` are pure Python and don't care about the OS; only the two shell scripts are macOS (Windows has its own in `broker/windows/`). `bb-show`'s fallback and the hook example are macOS only. Developed on macOS.
 
@@ -517,18 +572,18 @@ Everything is configured by environment: `BROKER_PROXY_PORT` (9222, what tools d
 **Windows is verified** (2026-10-02, Windows 11, Brave on Chromium 154, Python 3.14, logged-in real profile). Verified on that box: `/health` returned `{"ok": true, "brave": true}`, `/json/version` answered on 9222, a REST lease of a hidden tab evaluated `document.title` and closed on release, a legacy `/json` client and a raw browser-level client each saw only their own tab and never the human's, the stage opened a page in the human's window, and killing `proxy.py` brought it back on 9222/9223 within 10s. On Windows the stage relies on `Target.activateTarget` alone (the macOS app-activation step is skipped). Not covered yet: the close-and-relaunch path when the browser is already running without CDP, and a cold reboot. Logs: `launcher.log` and `broker.log` in the broker directory, `proxy.err` for Python tracebacks. If the browser is closed and reopened from its normal shortcut it comes back without CDP; run `windows\launch-browser.ps1` again (or sign out and back in).
 
 <a name="security"></a>
-### Security
+#### Security
 
 Localhost only, no auth. Anything that can reach `127.0.0.1:9223` can drive your logged-in browser, which is already true of `127.0.0.1:9222` the moment you enable remote debugging. Don't expose either.
 
-### Status
+#### Status
 
 Built in one night and proven with four manual tests: a leased tab loading Gmail authenticated while the human's visible tab sat on a different account; two agents running concurrently on separate targets; a simulated agent crash whose lease expired and was reclaimed; the human's tabs untouched throughout. Those manual runs are not checked in.
 
 Not yet built: a lane router that skips the browser entirely when a job is really an API call, and per-domain serialization so two agents never hammer one site as the same user.
 
 <a id="what-i-built-in-the-broker"></a>
-### What I built in the broker
+#### What I built in the broker
 
 Designed and written by Matt Macosko:
 
@@ -543,22 +598,22 @@ Designed and written by Matt Macosko:
 - [`get.sh`](broker/get.sh), [`install.sh`](broker/install.sh), [`launch-browser.sh`](broker/launch-browser.sh), [`launchd/com.browser-broker.plist`](broker/launchd/com.browser-broker.plist): the macOS one-line installer, browser launcher and LaunchAgent.
 - [`windows/install.ps1`](broker/windows/install.ps1), [`windows/launch-browser.ps1`](broker/windows/launch-browser.ps1), [`windows/run-broker.ps1`](broker/windows/run-broker.ps1): the Windows installer (Task Scheduler at-logon task), browser launcher and the supervisor that keeps `proxy.py` alive.
 
-## Tests
+### Tests
 
 Two suites, each run by CI on every push that touches its half:
 
 ```bash
-pip install -r requirements-dev.txt && python -m pytest                  # the agent: 27 tests
-cd broker && pip install -r requirements-dev.txt && python -m pytest     # the broker: 219 tests
+pip install -r requirements-dev.txt && python -m pytest                  # the agent: 54 tests
+cd broker && pip install -r requirements-dev.txt && python -m pytest     # the broker: 252 tests
 ```
 
 The agent's tests use a fake tab and a scripted model; nothing talks to a model, a browser, a broker or a phone. The broker's suite runs the real `proxy.py`, `broker.py`, `broker_client.py`, `bb-show` and the hook example against a small fake Chrome DevTools endpoint ([`broker/tests/fake_browser.py`](broker/tests/fake_browser.py)) on loopback ports. It covers the ownership rules end to end (two clients blind to each other and to the human's tabs, focus stealers and `Browser.close` swallowed, tabs released on disconnect), the `/json` legacy path, the REST lease API, the stage queue, the five rules, reaping and `tabs.json`. It needs no browser and no network and runs on Linux in about 30 seconds, on Python 3.9, 3.12 and 3.14. Two checks are macOS only (real `osascript`, `plutil`) and are skipped elsewhere. Neither suite drives a real Chrome, so the manual runs above still matter.
 
-## Files
+### Files
 
 - `agent.py`: the agent (single file)
 - `tests/`: the agent's five-rules tests and a live hidden-tab check
-- `broker/`: the broker: `proxy.py`, `broker_client.py`, `bb-show` / `bb-close` / `bb-peek`, the macOS and Windows installers, its tests, and its docs site
+- `broker/`: the broker: `proxy.py`, `broker_client.py`, `bb-show` / `bb-close` / `bb-peek` / `bb-click`, the macOS and Windows installers, its tests, and its docs site
 - `~/.local/mlx-native-server/server.py`: MLX inference server (ships with [claude-code-local](https://github.com/nicedreamzapp/claude-code-local))
 - `launchers/Browser Agent.command`: desktop launcher (ships with claude-code-local, surfaces as `Gemma 4 Browser.command`)
 
