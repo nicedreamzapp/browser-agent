@@ -112,11 +112,19 @@ class Tab:
             self.send("Input.dispatchMouseEvent", type=kind, x=x, y=y, button="left", buttons=buttons, clickCount=1)
             time.sleep(0.05)
 
+    def wake(self):
+        """Make a hidden tab act visible to the page (timers run, focus-gated buttons enable),
+        without bringing it forward. See SITE-RECIPES "buttons that only work when visible"."""
+        for method, params in (("Emulation.setFocusEmulationEnabled", {"enabled": True}),
+                               ("Page.setWebLifecycleState", {"state": "active"}),
+                               ("Network.enable", {})):
+            try:
+                self.send(method, **params)
+            except Exception:
+                pass
+
     def _before(self, shots, label):
-        try:
-            self.send("Network.enable")
-        except Exception:
-            pass
+        self.wake()
         self.events.clear()
         self.eval(_MUT_JS)
         b = {"state": self.state(), "children": self._children(), "t": time.time()}
@@ -389,7 +397,7 @@ _FIND_JS = "(() => {" + _FIND_CORE + r"""
   const r = el.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
   const top = document.elementFromPoint(x, y);
   const covered = top && top !== el && !el.contains(top) && !top.contains(el) ? top.tagName.toLowerCase() : null;
-  return JSON.stringify({x, y, w: r.width, h: r.height, tag: el.tagName.toLowerCase(),
+  return JSON.stringify({x, y, w: r.width, h: r.height, tag: el.tagName.toLowerCase(), disabled: !!el.disabled,
                          text: (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().slice(0, 80),
                          covered_by: covered});
 })()"""

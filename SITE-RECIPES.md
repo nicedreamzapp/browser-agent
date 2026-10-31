@@ -11,7 +11,9 @@ rule, so the next agent doesn't pay for the same lesson.
   `Input.dispatchMouseEvent` press and release at its center, then screenshots again and
   prints what changed (URL, title, DOM, new tab, HTTP errors). Trusted mouse clicks DO land
   in hidden tabs (tested 2026-10-31: `event.isTrusted` true in a hidden lease); only the
-  reply to `mouseMoved` lags about 5 s there, so the client sends it without waiting.
+  reply to `mouseMoved` lags about 5 s there unless the tab is woken first; `bb-click` runs
+  `Emulation.setFocusEmulationEnabled` + `Page.setWebLifecycleState active` before every click
+  (the GitHub OAuth fix below), which also makes `visibilityState` read visible.
   Many sites ignore `element.click()` (`isTrusted` false) or need a user gesture to open a
   popup. `tab.click()` tries the script click first and retries trusted when nothing moves
   in 3 s, logging a line to `broker/click.log`.

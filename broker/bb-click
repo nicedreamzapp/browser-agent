@@ -95,6 +95,8 @@ def report(r):
     el = r.get("element") or {}
     print(f"clicked ({r['how']}) at {r.get('x', '?')},{r.get('y', '?')}"
           + (f" on <{el.get('tag')}> \"{el.get('text', '')}\"" if el.get("tag") else ""))
+    if el.get("disabled"):
+        print("  note: that element is disabled (a timer or form check has not enabled it yet)")
     if el.get("covered_by"):
         print(f"  note: a <{el['covered_by']}> sits on top of it at that point (overlay or cookie banner?)")
     for c in r["changed"] or ["nothing changed in %ss" % r["seconds"]]:
