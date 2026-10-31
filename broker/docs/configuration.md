@@ -27,7 +27,11 @@ reads, file by file.
 | `BROWSER_APP` | `Brave Browser` | macOS app name the stage activates with `osascript` after showing a page. |
 | `BROKER_RECORD` | unset | `1` turns on the [Broker Recorder](trajectory-schema.md) for every job. Unset, only jobs that ask (`"record": true` on `/lease`, or `X-Broker-Record: 1` on a CDP websocket) are recorded. |
 | `BROKER_RECORD_DIR` | `~/.local/broker-recordings` | Where trajectories go. Created `0700`, files `0600`. Keep it out of cloud-synced folders. |
-| `BROKER_RECORD_SCREENSHOTS` | unset | `1` adds a half-scale PNG before each step, with every filled field, password field and iframe blacked out. |
+| `BROKER_RECORD_SCREENSHOTS` | unset | `1` adds a half-scale PNG before each step, with every filled field, password field and iframe blacked out, on allowed hosts only. |
+| `BROKER_RECORD_SCREENSHOT_HOSTS` | empty | Comma-separated hosts screenshots may be taken on. Empty means none. |
+| `BROKER_RECORD_DENY_HOSTS` | empty | More private hosts (only action and role recorded), added to the built-in list. |
+| `BROKER_RECORD_TRUST_SECS` | `5` | Typed text is kept only into a field clicked, or seen focused in a fresh snapshot, this recently. |
+| `BROKER_RECORD_KEEP_DAYS` / `BROKER_RECORD_MAX_MB` | `14` / `2048` | Daily cleanup of the recordings folder. |
 | `BROKER_RECORD_QUEUE` | `5000` | Events the recorder holds before it starts dropping (and counting) them. It never makes CDP traffic wait. |
 | `BROKER_DEBUG` | unset | Any non-empty value turns on Python `DEBUG` logging, which includes the `websockets` handshake trace. When unset, `websockets.server` handshake errors are silenced. |
 

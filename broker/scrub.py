@@ -41,6 +41,7 @@ SENSITIVE_AUTOCOMPLETE = re.compile(
 # names, ids, labels, placeholders, aria-labels
 SENSITIVE_NAME = re.compile(
     r"pass(word|wd|code|phrase|key)|(^|[^a-z])pass([^a-z]|$)|(^|[^a-z])pwd|(^|[^a-z])pin([^a-z]|$)|"
+    r"(^|[^a-z])code([^a-z]|$)|digit|"
     r"otp|one[\W_]*time|2fa|mfa|totp|verif(y|ication)[\W_]*code|auth(entication|orization)?[\W_]*code|"
     r"security[\W_]*(code|answer|question)|sec[\W_]*code|"
     r"card|(^|[^a-z])cc([^a-z]|$)|cc[\W_]*(num|no|exp|csc|cvv|cvc|name)|cvv|cvc|csc|ccv|expir|exp[\W_]*(date|month|year|mm|yy)|"
@@ -102,6 +103,27 @@ _PHONE = re.compile(
     r"(?<![\w.])(?:\+\d{1,3}[\s.\-]?)?(?:\(\d{2,4}\)[\s.\-]?|\d{2,4}[\s.\-])\d{3,4}[\s.\-]?\d{3,4}(?![\w.])"
     r"|(?<![\w.])\+\d{8,15}(?![\w.])|(?<![\w.$])\d{10,11}(?![\w.])")
 _TOKENISH = re.compile(r"[A-Za-z0-9_+/=.~-]{20,}")
+MONEY = "[MONEY]"
+ADDRESS = "[ADDRESS]"
+NUMBER = "[NUMBER]"
+NAME = "[NAME]"
+_MONEY = re.compile(r"(?:[$€£¥]|US\$|C\$|A\$)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:USD|EUR|GBP|CAD|AUD|dollars)\b",
+                    re.I)
+_STREET = re.compile(
+    r"\b\d{1,6}\s+(?:[NSEW]\.?\s+)?(?:[A-Za-z0-9'.-]+\s+){1,4}"
+    r"(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Way|Ct|Court|Pl|Place|Pkwy|Parkway|"
+    r"Hwy|Highway|Cir|Circle|Ter|Terrace|Trl|Trail|Loop|Sq|Square|Row|Run|Pike)\b\.?"
+    r"(?:\s*(?:#|Apt\.?|Suite|Ste\.?|Unit)\s*[\w-]+)?", re.I)
+_PO_BOX = re.compile(r"\bP\.?\s?O\.?\s*Box\s+\d+", re.I)
+_STATE_ZIP = re.compile(r"\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b")
+_ZIP_PLUS4 = re.compile(r"\b\d{5}-\d{4}\b")
+_LONG_DIGITS = re.compile(r"(?<![\w])\d(?:[\s-]?\d){9,}(?![\w])")
+_TRACKING = re.compile(r"\b(?:1Z[0-9A-Z]{16}|[A-Z]{2}\d{9}[A-Z]{2}|T\d{10}|\d{12,22})\b")
+_NAME_AFTER = re.compile(
+    r"\b((?:Hi|Hello|Hey|Dear|Thanks|Thank you|Regards|Cheers|Sincerely)[,]?\s+"
+    r"|(?:From|To|Cc|Bcc|Reply-To|Sender|Recipient|Attn|Attention|Name|Customer|Ship to|Bill to|"
+    r"Shipping to|Billing to|Sold to|Deliver to|Signed by)\s*:\s*)"
+    r"([A-Z][a-zA-Z'\u2019-]+(?:\s+[A-Z][a-zA-Z'\u2019.-]*){0,3})")
 
 
 def _entropy(s):
@@ -155,6 +177,14 @@ def scrub_text(s, max_len=None):
     s = _SSN.sub(SSN, s)
     s = _CARD.sub(CARD, s)
     s = _PHONE.sub(PHONE, s)
+    s = _TRACKING.sub(NUMBER, s)
+    s = _LONG_DIGITS.sub(NUMBER, s)
+    s = _MONEY.sub(MONEY, s)
+    s = _PO_BOX.sub(ADDRESS, s)
+    s = _STREET.sub(ADDRESS, s)
+    s = _ZIP_PLUS4.sub(ADDRESS, s)
+    s = _STATE_ZIP.sub(ADDRESS, s)
+    s = _NAME_AFTER.sub(lambda m: m.group(1) + NAME, s)
     s = _TOKENISH.sub(_tokens, s)
     if max_len is not None and len(s) > max_len:
         s = s[:max_len] + "..."
@@ -181,17 +211,23 @@ def looks_secret(text):
     return classes >= 3 or (classes == 2 and bool(re.search(r"\d", t)) and len(t) >= 8)
 
 
-def scrub_typed(text, target=None):
-    """Text an agent or helper typed. Returns (text_or_None, redacted: bool).
+def scrub_typed(text, target=None, trusted=True):
+    """Text an agent or helper typed. Returns (text_or_None, changed: bool).
 
-    Into a sensitive field: nothing at all (not even the length). Into an
-    unknown field: also nothing when it looks like a password or a code.
-    Otherwise emails, phones, cards and tokens are masked."""
+    Withheld entirely (not even the length) when any of these holds:
+      * the target is a sensitive field;
+      * the text looks like a password or a code, whatever field it went into
+        (a field's name can lie: a password box called "username");
+      * the target is unknown or not trusted: it came from a page snapshot taken
+        before the previous step, and was not clicked or focused just before.
+    Otherwise emails, phones, money, addresses, names and tokens are masked."""
     if text is None:
         return None, False
     if target is not None and is_sensitive_field(target):
         return REDACTED, True
-    if (target is None or not target.get("known", True)) and looks_secret(text):
+    if looks_secret(text):
+        return REDACTED, True
+    if target is None or not trusted:
         return REDACTED, True
     out = scrub_text(text, 2000)
     return out, out != text
@@ -296,22 +332,32 @@ _JS_STRING = re.compile(r"`(?:\\.|[^`\\])*`|\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\
 _JS_KEEP_LITERAL = re.compile(r"^['\"][\w\s#.\[\]=\-:>+~*^$|()'\",]*['\"]$")
 
 
-def scrub_js(code, max_len=2000, force_literals=False):
-    """JavaScript an agent ran. When it touches a value, a credential store or a
-    sensitive name, every string literal that is not plainly a CSS selector is
-    replaced; then the whole thing gets scrub_text()."""
+_JS_SELECTOR_CALL = re.compile(
+    r"(?:querySelector(?:All)?|closest|matches|getElementById|getElementsByClassName|getElementsByName|"
+    r"getElementsByTagName|waitForSelector|\$\$?|\$x)\s*\(\s*$")
+
+
+def scrub_js(code, max_len=2000, force_literals=True, sensitive=False):
+    """JavaScript an agent ran (Runtime.evaluate / Runtime.callFunctionOn).
+
+    Every string literal is removed, except the first argument of a selector call
+    (querySelector('#login'), closest('form')...) when it is plainly CSS and does
+    not look like a secret. el.setAttribute('value', 'Tr0ub4dor&3') loses both.
+    With sensitive=True (the target is a sensitive field) selectors go too.
+    force_literals=False keeps the old keyword-triggered behaviour for callers
+    that scrub something other than code the agent ran."""
     if code is None:
         return None
     code = str(code)
     if len(code) > 20000:
         code = code[:20000]
-    if force_literals or _JS_SENSITIVE.search(code):
+    if force_literals or sensitive or _JS_SENSITIVE.search(code):
         def lit(m):
             s = m.group(0)
             inner = s[1:-1]
-            if (not force_literals and _JS_KEEP_LITERAL.match(s) and not looks_secret(inner)
-                    and not re.search(r"@|\d{4,}", inner) and len(inner) <= 120
-                    and _looks_like_selector(inner)):
+            if (not sensitive and s[0] != "`" and _JS_SELECTOR_CALL.search(code[max(0, m.start() - 40):m.start()])
+                    and len(inner) <= 120 and not looks_secret(inner) and not re.search(r"@|\d{4,}", inner)
+                    and (_looks_like_selector(inner) or re.fullmatch(r"[a-zA-Z][\w-]{0,40}", inner))):
                 return s
             return '"' + REDACTED + '"'
         code = _JS_STRING.sub(lit, code)
@@ -333,6 +379,59 @@ def _looks_like_selector(s):
         return False
     return all(_SEL_PART.match(p) or re.fullmatch(r"[a-zA-Z][\w-]*", p) for p in parts) and \
         any(_SEL_PART.match(p) for p in parts)
+
+
+# ---------------------------------------------------------------------------
+# hosts where nothing but the action and the element's role is recorded
+# ---------------------------------------------------------------------------
+# Mail, messages, banks, payments, government and health: the page itself is the
+# private data. Extend with BROKER_RECORD_DENY_HOSTS (comma-separated host suffixes
+# or substrings beginning with "*", e.g. "example.com,*credit").
+DENY_HOSTS = (
+    "mail.google.com", "inbox.google.com", "voice.google.com", "messages.google.com", "contacts.google.com",
+    "drive.google.com", "docs.google.com", "photos.google.com", "calendar.google.com", "pay.google.com",
+    "outlook.live.com", "outlook.office.com", "outlook.office365.com", "mail.yahoo.com", "mail.proton.me",
+    "proton.me", "icloud.com", "fastmail.com", "mail.hostinger.com", "webmail.",
+    "authorize.net", "paypal.com", "venmo.com", "cash.app", "stripe.com", "squareup.com", "wise.com",
+    "chase.com", "wellsfargo.com", "bankofamerica.com", "capitalone.com", "americanexpress.com",
+    "discover.com", "citi.com", "usbank.com", "schwab.com", "fidelity.com", "vanguard.com", "coinbase.com",
+    "irs.gov", "ssa.gov", "cdtfa.ca.gov", "edd.ca.gov", "dmv.ca.gov", "healthcare.gov", "mychart",
+    "web.whatsapp.com", "web.telegram.org", "messenger.com", "wechat.com", "web.wechat.com",
+)
+DENY_PATTERNS = ("bank", "credit", "pay.", "billing", "wallet", "login.", "accounts.", "signin.", "auth.")
+
+
+def _host(url):
+    try:
+        return (urlsplit(url or "").hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def host_denied(url, extra=None):
+    """True when `url` is on a host where only the action and the role are recorded."""
+    h = _host(url)
+    if not h:
+        return False
+    for d in tuple(DENY_HOSTS) + tuple(extra or ()):
+        d = d.strip().lower()
+        if not d:
+            continue
+        if d.startswith("*"):
+            if d[1:] in h:
+                return True
+        elif d.endswith("."):
+            if h.startswith(d) or ("." + d) in h:
+                return True
+        elif h == d or h.endswith("." + d) or (d.isalpha() and d in h):
+            return True
+    return any(p in h for p in DENY_PATTERNS)
+
+
+def host_allowed(url, allow):
+    """True when `url`'s host is on the explicit allowlist (exact host or a subdomain of one)."""
+    h = _host(url)
+    return bool(h) and any(h == a or h.endswith("." + a) for a in (x.strip().lower() for x in allow or ()) if a)
 
 
 # ---------------------------------------------------------------------------

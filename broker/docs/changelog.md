@@ -21,6 +21,13 @@ from the git history on `main`. Commit hashes link to GitHub.
   sensitive fields, credentials, tokens, emails and phones never reach disk. Recording runs on
   its own thread and never delays CDP traffic. `record_export.py` turns recordings into SFT
   data for small vision models. See [the schema](trajectory-schema.md).
+- **Recorder hardening after review.** Typed text that looks like a password or code is withheld
+  whatever the field; text into a field not clicked or freshly seen focused is withheld; "code" /
+  "digit" fields are sensitive; every JS string literal is removed except plain selector
+  arguments; money, addresses, tracking / order numbers and greeted names are masked; mail, bank,
+  payment and government hosts record only the action and role; screenshots need a host
+  allowlist; snapshots cap at 2000 nodes and skip unchanged pages; recordings are pruned daily
+  (14 days, 2 GB).
 
 ## 2026-10-23
 

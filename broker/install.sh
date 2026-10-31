@@ -26,7 +26,8 @@ echo "using $PY"
 # because launchd does not pass your shell's environment to the agent.
 ENV_XML=""
 for v in BROKER_PROXY_PORT BROKER_UPSTREAM_PORT BROKER_PORT BROWSER_APP \
-         BROKER_RECORD BROKER_RECORD_DIR BROKER_RECORD_SCREENSHOTS; do
+         BROKER_RECORD BROKER_RECORD_DIR BROKER_RECORD_SCREENSHOTS BROKER_RECORD_SCREENSHOT_HOSTS \
+         BROKER_RECORD_DENY_HOSTS BROKER_RECORD_TRUST_SECS BROKER_RECORD_KEEP_DAYS BROKER_RECORD_MAX_MB; do
   val="${!v:-}"
   [ -n "$val" ] && ENV_XML="$ENV_XML<key>$v</key><string>$val</string>"
 done

@@ -29,7 +29,11 @@ Optional:
 | Setting | Effect |
 |---|---|
 | `BROKER_RECORD_DIR` | output directory, default `~/.local/broker-recordings` |
-| `BROKER_RECORD_SCREENSHOTS=1` | a masked half-scale PNG before each step |
+| `BROKER_RECORD_SCREENSHOTS=1` | a masked half-scale PNG before each step, **only** on hosts in `BROKER_RECORD_SCREENSHOT_HOSTS` |
+| `BROKER_RECORD_SCREENSHOT_HOSTS` | comma-separated hosts screenshots are allowed on (subdomains included). Empty (the default) means no screenshots at all |
+| `BROKER_RECORD_DENY_HOSTS` | more private hosts, added to the built-in list (see below) |
+| `BROKER_RECORD_TRUST_SECS` | how recently a field must have been clicked, or seen focused, for text typed into it to be kept (default 5) |
+| `BROKER_RECORD_KEEP_DAYS`, `BROKER_RECORD_MAX_MB` | daily cleanup: keep 14 days and at most 2048 MB (oldest days go first, today never) |
 | `BROKER_RECORD_QUEUE` | events held before dropping (default 5000) |
 
 Give the job a task, so the trajectory says what it was for:
@@ -50,6 +54,9 @@ Say how it went when you finish: `POST /release {"lease_id": ..., "outcome": "su
 - Snapshots, screenshots, scrubbing and file writes run on one daemon thread with its own
   event loop and its own page socket to the browser (read-only `Runtime.evaluate` and
   `Page.captureScreenshot`; no input, no navigation, no focus).
+- A snapshot looks at no more than 2000 DOM nodes, and first compares a cheap signature
+  (URL, title, node count, scroll, viewport, focused element, filled-field count) with the last
+  one; when nothing changed, the page is not walked again.
 - The page snapshot for a step is the newest one taken after the previous step settled
   (0.6 s, or 1.5 s after a click, Enter or navigation). The step is never held back to take a
   fresh one. If the agent moved faster than that, the step says `"observation_stale": true`.
@@ -65,6 +72,9 @@ Say how it went when you finish: `POST /release {"lease_id": ..., "outcome": "su
     3f9a1c2b7d4e/                      0700, screenshots for that job, when enabled
       7.png                            0600, the page before step 7
 ```
+
+Once a day the recorder deletes days older than 14 and, if the folder is still over 2 GB,
+the oldest days until it is not. Today's folder is never deleted.
 
 A job's file is created at its first step. Lines are appended as the job runs, so a crash
 leaves everything up to that point.
@@ -175,38 +185,56 @@ Then every string in the record goes through the scrubber again.
   routing / account number, IBAN, secret, token, API key, recovery / seed phrase, date of birth,
   passport, licence number. Text typed, inserted or set into one is replaced by `[REDACTED]`,
   length included. JavaScript run while one is the target has every string literal removed.
-- **Unknown fields.** Typed text whose target is unknown is withheld when it looks like a
-  password (one word, 6-64 characters, mixed character classes) or a code (4-8 digits alone).
+- **Typed text is withheld entirely** (`[REDACTED]`, length too) when it looks like a password
+  (one word, 6-64 characters, mixed character classes) or a code (4-8 digits alone), **whatever
+  field it went into** (a field's name can lie); and when the field it went into is not known
+  for sure: kept only if that field was clicked in the last 5 s, or seen focused in a snapshot
+  taken after the previous step and less than 5 s old. Fields named or labelled just "code", or
+  anything with "digit", count as sensitive.
+- **Private hosts.** On mail (Gmail, Outlook, Yahoo, Proton, iCloud, webmail), Google Voice /
+  Messages / Drive / Docs / Photos / Contacts, WhatsApp / Telegram / Messenger / WeChat web,
+  payments (PayPal, Authorize.net, Stripe, Venmo, Cash App, Square, Wise), banks and brokers,
+  IRS / SSA / CDTFA / EDD / DMV, health portals, and any host containing bank, credit, billing,
+  wallet, or starting login. / accounts. / signin. / auth. / pay., plus `BROKER_RECORD_DENY_HOSTS`:
+  only the action and the element's role and box are written. No path, no title, no names, no
+  text, no code, no screenshot. The step says `"private_host": true`.
 - **Free text everywhere** (typed text, element names, titles, tasks, errors, code): emails,
   phone numbers, 13-19 digit card-like numbers, SSNs, JWTs, bearer / basic credentials,
   `Authorization`, `Cookie`, `Set-Cookie` and API-key headers, `password=` / `token:` style
   pairs, private keys, known key formats (OpenAI, Anthropic, Stripe, GitHub, Slack, AWS, Google,
-  Hugging Face, ...), and long random-looking strings (session ids, tokens) become placeholders:
-  `[EMAIL]`, `[PHONE]`, `[CARD]`, `[SSN]`, `[TOKEN]`, `[REDACTED]`.
+  Hugging Face, ...), long random-looking strings (session ids, tokens), money amounts, street
+  addresses, PO boxes, ZIP codes after a state, tracking numbers and any run of 10+ digits (order,
+  phone, tracking), and names after Hi / Hello / Dear / Thanks / From: / To: / Ship to: / Bill to:
+  become placeholders: `[EMAIL]`, `[PHONE]`, `[CARD]`, `[SSN]`, `[TOKEN]`, `[MONEY]`, `[ADDRESS]`,
+  `[NUMBER]`, `[NAME]`, `[REDACTED]`.
 - **URLs.** `user:password@` is dropped; query and fragment parameters named like tokens,
   codes, state, sessions, keys, signatures, emails, phones or click ids are `[REDACTED]`;
   random-looking values and path segments are `[TOKEN]`; `data:` and `blob:` URLs are dropped.
-- **JavaScript.** When code touches `.value`, `insertText`, cookies, storage, credentials or a
-  sensitive name, every string literal that is not plainly a CSS selector is removed.
+- **JavaScript.** Every string literal in code an agent ran is removed, except the plain CSS
+  argument of a selector call (`querySelector('#login')`, `closest('form')`), and those go too
+  when the target is a sensitive field. `el.setAttribute('value', 'Tr0ub4dor&3')` keeps neither.
 - **Never written:** cookies, request / response headers or bodies, anything from the
   `Network`, `Fetch`, `Storage`, `DOMStorage`, `IndexedDB`, `CacheStorage`, `Security`,
   `WebAuthn` and `Autofill` domains, file paths (base names only), `callFunctionOn` arguments,
   any command result beyond ok / error.
-- **Screenshots** (only with `BROKER_RECORD_SCREENSHOTS=1`): every filled field, every password
+- **Screenshots** (only with `BROKER_RECORD_SCREENSHOTS=1` and only on a host in
+  `BROKER_RECORD_SCREENSHOT_HOSTS`, never a private host, never when the mask walk hit its
+  2000-node cap): every filled field, every password
   field and every iframe (payment and captcha frames) is painted black before the PNG is written.
   The masks are read again after the capture; if they moved, the screenshot is discarded. A PNG
   the masker cannot rewrite is discarded too, never written unmasked.
 
 ### Known gaps
 
-- Page text in **screenshots** is not scrubbed: an inbox or an account page shows names and
-  addresses. Screenshots are off by default for that reason.
-- Element names are scrubbed for emails, phones and tokens, but other personal text (a person's
-  name in a link, a message subject) can remain.
+- Page text in **screenshots** is not scrubbed, so screenshots need an explicit host allowlist.
+- Element names, titles and typed text are masked for the patterns above, but a person's name
+  that no greeting or header introduces (a name alone in a link or a table cell) can remain on
+  hosts that are not on the private list.
+- Typing into a field more than 5 s after clicking it, with no fresh snapshot, is withheld:
+  safe, but some good training text from slow agents is lost.
 - Elements inside iframes and shadow roots are not in the snapshot.
 - A field the page does not label as sensitive in any way (a password box named `field_7`
   with no label) relies on the unknown-field heuristic.
-- Recordings are not pruned; delete old days yourself.
 
 ## Exporting training data
 
