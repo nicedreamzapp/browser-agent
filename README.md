@@ -211,7 +211,7 @@ pip3 install websockets websocket-client
 curl localhost:9223/status
 ```
 
-Python 3.9+. Brave is the default; for Chrome: `BROWSER_APP="Google Chrome" ./launch-browser.sh`. Chrome 136+ also needs its own profile folder (`--user-data-dir`), see the note in Quick start. Already have something on 9222 you can't restart? Try it on another port first: `BROKER_PROXY_PORT=9224 BROKER_UPSTREAM_PORT=9222 BROKER_PORT=9225 python3 proxy.py`.
+Python 3.9+. Brave is the default; for Chrome: `BROWSER_APP="Google Chrome" ./launch-browser.sh`. Chrome 136+ also needs its own profile folder (`--user-data-dir`), see the note in "Get started in 3 steps". Already have something on 9222 you can't restart? Try it on another port first: `BROKER_PROXY_PORT=9224 BROKER_UPSTREAM_PORT=9222 BROKER_PORT=9225 python3 proxy.py`.
 
 **2. The agent.** Needs Apple Silicon (32 GB+ unified memory recommended), Python 3.12+, and the local MLX server from [claude-code-local](https://github.com/nicedreamzapp/claude-code-local):
 
