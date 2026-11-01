@@ -155,6 +155,29 @@ Rules for the list:
   `/user/<name>/comments.json`. Reddit's site-wide search ORs your words, so search per
   subreddit (`/r/<sub>/search.json?restrict_sr=1`) with exact phrases.
 
+- **Reddit native video post with body text (verified 2026-10-31, 49 MB mp4, hidden lease):**
+  PRAW's `submit_video` can't attach body text, so use the new Shreddit composer at
+  `/r/<sub>/submit/?type=IMAGE`. It is one form (no tabs) with title, flair and body; the
+  attachment lives in a hidden `r-post-media-input` inside
+  `faceplate-form-section name="type" pattern="IMAGE|VIDEO"`. Steps: `DOM.setFileInputFiles`
+  on `r-post-media-input`'s shadow `input[type=file]`; wait until its shadow text loses
+  "Uploading..." and `.value` holds `url` + `posterUrl` (Reddit makes the poster itself).
+  Title: shadow `textarea` of `post-composer-title`, set the value, then fire `input`. Body: click
+  the "Switch to Markdown" button and set the value of the shadow textarea of
+  `shreddit-markdown-composer`. Flair: the trigger button is in shadow DOM, so `bb-click` text
+  search misses it; script-click it, click "View all flairs", then trusted-click the radio
+  (scroll it into view first, because the dialog footer covers the lower rows), then "Add".
+  **The trap:** the form drops the video unless the hidden `input[name=type]` reads `VIDEO`
+  and that section's `<fieldset>` is enabled. Otherwise the post goes up as text only, with
+  no error. Set both, then do a dry run: wrap `fetch`, catch the `/svc/shreddit/graphql` body
+  holding `CreatePost`, reject it (nothing is sent; a red "Form submission failed" bar is the
+  only effect), and check that `variables.input` has `video:{url,posterUrl}`, `content.markdown`
+  and `flair`. Then let the next click through. The response's `createSubredditPost.post.permalink`
+  is the post. The toolbar video button in Markdown mode does nothing, and in rich-text
+  mode it adds the video inline instead of making a native video post. Confirm with the API
+  (`/by_id/t3_<id>`): `is_video` true, `post_hint` `hosted:video`,
+  `media.reddit_video.transcoding_status` `completed`, `selftext` complete.
+
 ## Privacy opt-out forms
 
 - **Same-vendor families:** TruePeopleSearch, CyberBackgroundChecks,
