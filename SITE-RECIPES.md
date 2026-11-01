@@ -177,6 +177,17 @@ Rules for the list:
   mode it adds the video inline instead of making a native video post. Confirm with the API
   (`/by_id/t3_<id>`): `is_video` true, `post_hint` `hosted:video`,
   `media.reddit_video.transcoding_status` `completed`, `selftext` complete.
+  **Additions (2026-11-01, mini, r/LTXVideo dry runs):** (1) In a hidden tab the upload sits on
+  "Uploading..." forever with zero network traffic until you send `Emulation.setFocusEmulationEnabled`
+  (enabled) and `Page.setWebLifecycleState` (active); then it finishes in about 30 s. (2) There are two
+  `faceplate-form-section name="type"` sections. The one to fix is `[pattern="IMAGE|VIDEO"]`, and its
+  `fieldset` is the disabled one; the first section (`TEXT|VIDEO|...`) is the wrong one. (3) The "Switch to
+  Markdown" button can be hidden in the responsive toolbar: trusted-click "More options", then the
+  "Switch to Markdown" menu item. The body textarea lives in nested shadow roots, so search recursively,
+  trusted-click it and use `Input.insertText`. (4) Switch to Markdown and type the body BEFORE attaching the
+  video. (5) Wait for the Post button's `disabled` to clear after `ValidateCreatePostInput`, then trusted-click it.
+  (6) Match the dry-run intercept on `"operation":"CreatePost"` exactly, because draft autosaves carry the word too.
+  Working script: mini `~/scripts/reddit-ltx-post/post.py` (`--dry` / `--real`).
 
 ## Privacy opt-out forms
 
