@@ -106,6 +106,17 @@ Rules for the list:
   the human is working in it" and the leased tab was relabeled the human's own, though
   nobody touched it (the Post submit fires trusted events). Always check Brave's real tab
   list afterwards and close that tab by target id with `bb-close --matt-asked`.
+- **LinkedIn native video from a hidden lease (verified 2026-10-31, 49 MB mp4):** same
+  `click` patch and "Media" click as images; the input's `accept` includes `video/*`. After
+  `DOM.setFileInputFiles` an "Editor" dialog (Back / Next) shows the video within seconds;
+  "Next" returns to the composer and Post is enabled at once. The upload finishes AFTER
+  Post, so keep the tab open until the toast's `/feed/update/urn:li:...` link appears
+  (about 40 s here); closing early kills the upload. Two traps: the page holds several
+  hidden `[role=dialog]` caption-settings boxes ("Reset | Done"), so don't read buttons by
+  dialog role; find the composer by climbing from the editor to the ancestor that holds
+  the Post button, then count `video` in it. And the toast regex can also match other feed
+  posts, so open the URL and read the text back before calling it yours. LinkedIn renders
+  links in the text as `lnkd.in` short links; that is normal, not a typo.
 
 - **X (Twitter) composer:** Draft.js ignores `Input.insertText` AND `document.execCommand`
   in a background tab, so the composer stays empty. Show the composer as a visible tab
@@ -119,10 +130,24 @@ Rules for the list:
   `https://x.com/intent/post?in_reply_to=<status id>&text=<url-encoded text>` (drop
   `in_reply_to` for a new post). X fills the composer itself, so Draft.js never sees a
   keystroke. Read the textarea back, check `tweetButton` is enabled, click it, then confirm
-  the post on `/<handle>/with_replies`. Images still need the visible composer above.
+  the post on `/<handle>/with_replies`. Media can go in the same hidden intent composer (see below).
   The profile timeline can lag several minutes after a post, so it is NOT proof of failure. Confirm with
   `x.com/search?q=from%3A<handle>%20%22<phrase>%22&f=live` instead. If you retry anyway, a CreateTweet
   reply with error 187 "Status is a duplicate" means the first try already posted (2026-10-25).
+
+- **X post with native video, then a thread, all hidden (verified 2026-10-31):** no visible
+  composer needed. Open the intent URL with the text, then `DOM.setFileInputFiles` on
+  `input[data-testid="fileInput"]` in that same intent composer. `[data-testid=attachments]`
+  reads "<file>: Uploading" and then "<file>: Ready"; `tweetButton` stays disabled until
+  then (under a minute for 49 MB / 46 s). Before clicking, wrap `fetch` and
+  `XMLHttpRequest` in the page to keep the `CreateTweet` response; its
+  `data.create_tweet.tweet_results.result.rest_id` is the new status id, so each next post
+  goes in as `intent/post?in_reply_to=<that id>&text=...` with no search step (5 posts in
+  about 75 s). Verify with no tab at all:
+  `https://cdn.syndication.twimg.com/tweet-result?id=<id>&token=4` returns the text (URLs
+  as t.co plus `entities.urls[].expanded_url`) and a `video` field. A hidden status page
+  sometimes leaves a trailing link out of `tweetText`, so a DOM readback of the last URL
+  is not proof it is missing.
 
 - **Reddit comments:** skip the composer. In a logged-in tab (a background tab is fine),
   read `modhash` from `/api/me.json`, then POST `/api/comment` (`api_type=json`,
