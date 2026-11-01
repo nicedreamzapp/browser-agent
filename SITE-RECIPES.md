@@ -206,6 +206,14 @@ Rules for the list:
   stale draft. Keep the message to ONE paragraph: every Enter sends, so a blank line between
   paragraphs posts two messages (use Shift+Enter if you really need a line break). Confirm by
   re-reading the room's own nav entry and looking for `You: <first words>`.
+  **Never key a watcher's state on that row's full text.** The display name on the left is
+  lazy-loaded, so an early read renders `batcarpet121 Oct 1 batcarpet121: Apologies...` as
+  `Oct 1 : Apologies...`. Every row then looks changed and the watcher re-sends the whole
+  list (13 false alarms, 2026-11-01). Key on the message BODY only: split after the
+  timestamp (`\d{1,2}:\d{2} (AM|PM)` or `Mon D`), drop the speaker before the first colon,
+  store what is left. Decide "this one is mine" on a literal `You` speaker, never on an
+  empty one, so a name that hasn't loaded errs toward notifying instead of swallowing a
+  real reply. Same shape applies to any lazy-rendered list you diff between runs.
 
 ## Privacy opt-out forms
 
