@@ -189,6 +189,24 @@ Rules for the list:
   (6) Match the dry-run intercept on `"operation":"CreatePost"` exactly, because draft autosaves carry the word too.
   Working script: mini `~/scripts/reddit-ltx-post/post.py` (`--dry` / `--real`).
 
+- **Reddit CHAT (`/chat`), reading and replying from a hidden lease (verified 2026-11-01).**
+  Chat is invisible to the inbox API, so `/api/me.json` and `/message/unread` never show it.
+  The shadow roots here ARE walkable, so a recursive `n.shadowRoot` walk works where a plain
+  selector returns 0. Thread list: collect every `A` whose `getRootNode().host.tagName` is
+  `RS-ROOMS-NAV-ROOM`; the link text is `<who> <time> <newest line>`, so a thread is unread
+  when that text has no `You: ` after the timestamp. Open one room directly at
+  `https://www.reddit.com/chat/room/!<id>%3Areddit.com`.
+  **The composer is a plain `TEXTAREA`, but it is NOT the only editable box on the page.**
+  The "Today" date divider also matches `contenteditable`/placeholder probes and sits above
+  it. Taking the first match clicked the divider and typed nothing. Collect every editable
+  box, sort by `getBoundingClientRect().y` descending and take the BOTTOM-MOST one. Click it
+  with `Input.dispatchMouseEvent`, send Cmd+A then Backspace first (drafts persist per room),
+  then `Input.insertText`, which does land here unlike most hidden tabs. Read the textarea
+  back before pressing Enter, because a bare Enter sends and a miss would post a blank or a
+  stale draft. Keep the message to ONE paragraph: every Enter sends, so a blank line between
+  paragraphs posts two messages (use Shift+Enter if you really need a line break). Confirm by
+  re-reading the room's own nav entry and looking for `You: <first words>`.
+
 ## Privacy opt-out forms
 
 - **Same-vendor families:** TruePeopleSearch, CyberBackgroundChecks,
