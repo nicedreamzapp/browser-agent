@@ -475,3 +475,34 @@ Learned claiming a Lounge.ai profile through GitHub OAuth, 2026-10-30.
   wizard) must run inside ONE lease, in one script. Splitting the steps across runs lands
   every later step on a fresh `about:blank`. Server-persisted wizard steps are the exception:
   those can be resumed by leasing the step URL again.
+
+## USPS tracking: "Text & Email Updates" signup (2026-11-02)
+
+Signing Matt up for scan alerts on a stalled package. No login needed — but a real
+browser is.
+
+- **`tools.usps.com` 403s every scripted HTTP client.** `urllib`/`requests` with a normal
+  User-Agent gets `HTTP Error 403: Forbidden` from their bot protection. There is no API
+  for this. It has to be a broker tab.
+- **Open the drawer first:** `bb-click <owner> "Text & Email Updates"` (an `a.collapsed.triggerDrawer`).
+  The fields do not exist in the DOM until it is open.
+- **The submit button is `#teuButton_0`, labelled "Get Updates".** `click_trusted("Submit")`
+  raises `nothing visible matches 'Submit'`. There IS a `#crossSellSubmit` reading "Submit"
+  on the page — that one belongs to the Informed Delivery cross-sell banner and is the
+  wrong button. Target `#teuButton_0` by id.
+- **There is no `<form>` element.** `closest('form')` returns null, so `form.requestSubmit()`
+  is not available; the button is the only way.
+- **Field ids, all suffixed `_0`:** `emailFuture_0` (expected delivery), `emailDnd_0` (day of
+  delivery), `emailOA_0` (all other activity) — those three are the complete set of email
+  checkboxes. Then `emailUpdate_name1_0` (name), `emailUpdate_email1_0` (email),
+  `agreedTextUpdates_0` (terms). The text/SMS twins are `textFuture_0` / `textOA_0` /
+  `textUpdatePhoneNumber_0`; leave them alone unless a phone number is wanted.
+- **Name, email and terms are `display:none` until an email checkbox is ticked.** Tick the
+  boxes with a real `.click()` first, wait ~2s, then set the text fields.
+- **Scope any field dump.** The page carries three global-header search inputs
+  (`#global-header--search-*`) that swamp an unfiltered `querySelectorAll('input')`, and
+  their labels mis-resolve to `*First Name`.
+- **Confirmation to check for:** the drawer is replaced by "Confirmation - We Received Your
+  Request" plus "Your updates will be sent to: <email>". Screenshot it; the page does not
+  navigate, so URL and title are unchanged and only ~21 DOM mutations report.
+- Fill and submit must share ONE lease, per the hidden-lease rule above.
