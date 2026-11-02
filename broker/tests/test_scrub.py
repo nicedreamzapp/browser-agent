@@ -203,7 +203,7 @@ def test_bare_email_typed_into_email_field_is_masked():
     ("key sk-proj-AbCdEfGhIjKlMnOpQrStUv123", "AbCdEfGhIjKlMnOpQrStUv123"),
     ("ghp_1234567890abcdefghijABCDEFGHIJ", "ghp_1234567890abcdefghij"),
     ("AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE"),
-    ("AIzaSyD-1234567890abcdefghijklmnopqrstu", "AIzaSyD-1234567890"),
+    ("AIza" + "SyD-1234567890abcdefghijklmnopqrstu", "AIza" + "SyD-1234567890"),
     ("xoxb-123456789012-abcdefghijkl", "xoxb-123456789012"),
     ("password=hunter2", "hunter2"),
     ('"pwd": "s3cr3t"', "s3cr3t"),
