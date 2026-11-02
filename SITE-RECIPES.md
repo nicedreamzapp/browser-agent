@@ -506,3 +506,6 @@ browser is.
   Request" plus "Your updates will be sent to: <email>". Screenshot it; the page does not
   navigate, so URL and title are unchanged and only ~21 DOM mutations report.
 - Fill and submit must share ONE lease, per the hidden-lease rule above.
+
+## Etsy listing editor: toast blocks Publish (2026-11-02)
+The `.wt-toast` "attribute suggestions" toast covers "Publish changes" and won't close via its button. Hide it with `style.display='none'`, then trusted-click Publish, then reopen the editor to confirm the value stuck.
