@@ -155,6 +155,11 @@ Rules for the list:
   `/user/<name>/comments.json`. Reddit's site-wide search ORs your words, so search per
   subreddit (`/r/<sub>/search.json?restrict_sr=1`) with exact phrases.
 
+- **Reddit chat DM reply (verified 2026-11-03, hidden lease):** open the `/chat/room/<id>` URL, wait ~8 s,
+  walk every shadow root. The composer is the `textarea` labeled "Write message" (skip `g-recaptcha-response`);
+  set its value with the native HTMLTextAreaElement setter + an `input` event. The send button's aria-label is
+  exactly "Send message". A loose `/send/i` match hits "Send media" first and sends nothing. Read the last
+  timeline text afterward: your username plus the message means it went out, and the box goes empty.
 - **Reddit native video post with body text (verified 2026-10-31, 49 MB mp4, hidden lease):**
   PRAW's `submit_video` can't attach body text, so use the new Shreddit composer at
   `/r/<sub>/submit/?type=IMAGE`. It is one form (no tabs) with title, flair and body; the
