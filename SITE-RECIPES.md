@@ -525,3 +525,12 @@ The `.wt-toast` "attribute suggestions" toast covers "Publish changes" and won't
 - Call `tab.wake()` first, then `click_trusted("Enable")` (a real `<button>` about 68x32 near x 242, y 361 in a 1280 wide tab). Success: the URL moves to `/apis/api/<service>/metrics` within about 5 s. The API worked for the service account a minute later.
 - Used for Site Verification + Search Console on a GitHub Pages subpath: FILE method works for a URL-prefix property under `/repo/` (MkDocs copies `docs/googleXXXX.html` as-is). Script: mini `~/Scripts/gsc-ccl/` (`enable_api.py`, `gsc_ccl.py token|verify|add|sitemap|owner|status`).
 - Adding `matt@ineedhemp.com` as a webResource owner is stored as `divinetribe@ineedhemp.com` (alias of the same Workspace user).
+
+## Elementor contact forms (hightimes.com, 2026-11-03)
+A trusted mouse click on the submit button fires no request in a hidden or visible broker tab (invisible reCAPTCHA hook never runs from the click). Set field values with the native value setter + input/change events, then call `form.requestSubmit()`. Elementor posts to `/wp-admin/admin-ajax.php` and shows `.elementor-message-success`. Hook XHR to read the JSON response as proof. Script: ~/Scripts/mu-press/ht_submit.py.
+
+## Forms with a picture captcha (Jotform + hCaptcha, ganjapreneur, 2026-11-03)
+Never solve it. Build a prefilled URL (Jotform: `?yourName[first]=..&yourEmail=..&yourMessage=..`, field name minus the `qN_` prefix), check the values in a hidden tab without submitting, and hand Matt the link; he solves it on his phone in about 10 s.
+
+## Required phone on cannabisbusinesstimes.com contact form
+Submit stays `disabled` until every field incl. phone is filled; use the shop's public number from ineedhemp.com/contact-us.
