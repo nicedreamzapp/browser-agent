@@ -518,3 +518,10 @@ The `.wt-toast` "attribute suggestions" toast covers "Publish changes" and won't
 - Hidden lease without focus emulation: clicking "Media" leaves the Editor stuck on "Loading" and no file input appears. Call `Emulation.setFocusEmulationEnabled` then reload before clicking Media; the input then shows up.
 - Even with that, Post from a HIDDEN tab ended in the toast "We encountered a problem sharing your post." twice (3 MB H.264 mp4, nothing posted). The same script with `lease(..., hidden=False)` on the idle mini posted at once and the toast link appeared. Video posts: use a visible lease on an idle machine (10+ idle minutes) from the start.
 - Script: mini `~/Scripts/ccl-launch/li_post.py` (dry run by default, `--post` posts, reads back text and video on the post page).
+
+## Google Cloud console: enabling an API (2026-11-03)
+- Hidden lease works, account 0 (`&authuser=0`) owns the Search Console service account's project. Open `https://console.cloud.google.com/apis/library/<service>.googleapis.com?project=<number>&authuser=0`.
+- The console silently rewrites a project NUMBER to its project ID in the URL (894149772774 became `stalwart-city-437023-m3`, "My First Project"). That is the same project, not a wrong account; check the key file's `project_id` before trying other accounts.
+- Call `tab.wake()` first, then `click_trusted("Enable")` (a real `<button>` about 68x32 near x 242, y 361 in a 1280 wide tab). Success: the URL moves to `/apis/api/<service>/metrics` within about 5 s. The API worked for the service account a minute later.
+- Used for Site Verification + Search Console on a GitHub Pages subpath: FILE method works for a URL-prefix property under `/repo/` (MkDocs copies `docs/googleXXXX.html` as-is). Script: mini `~/Scripts/gsc-ccl/` (`enable_api.py`, `gsc_ccl.py token|verify|add|sitemap|owner|status`).
+- Adding `matt@ineedhemp.com` as a webResource owner is stored as `divinetribe@ineedhemp.com` (alias of the same Workspace user).
