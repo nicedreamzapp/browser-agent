@@ -513,3 +513,8 @@ The `.wt-toast` "attribute suggestions" toast covers "Publish changes" and won't
 - old.reddit `/api/compose` with `to=/r/Sub` returns 404 now, and the oauth `/api/mod/conversations` with the session token_v2 returns 403 MOD_REQUIRED.
 - New-reddit `/message/compose/?to=/r/Sub` in a HIDDEN tab: setting the faceplate inputs and sending CDP key events fills the text, but Send stays disabled (likely the reCAPTCHA gate). Do not loop; it needs the visible tab with Matt's OK, or skip it.
 - Filtered (`automod_filtered`) posts often clear on their own in minutes: re-check `/api/info.json?id=t3_...` before asking the mods anything.
+
+## LinkedIn native video: hidden lease now fails (2026-11-03)
+- Hidden lease without focus emulation: clicking "Media" leaves the Editor stuck on "Loading" and no file input appears. Call `Emulation.setFocusEmulationEnabled` then reload before clicking Media; the input then shows up.
+- Even with that, Post from a HIDDEN tab ended in the toast "We encountered a problem sharing your post." twice (3 MB H.264 mp4, nothing posted). The same script with `lease(..., hidden=False)` on the idle mini posted at once and the toast link appeared. Video posts: use a visible lease on an idle machine (10+ idle minutes) from the start.
+- Script: mini `~/Scripts/ccl-launch/li_post.py` (dry run by default, `--post` posts, reads back text and video on the post page).
