@@ -160,6 +160,15 @@ Rules for the list:
   set its value with the native HTMLTextAreaElement setter + an `input` event. The send button's aria-label is
   exactly "Send message". A loose `/send/i` match hits "Send media" first and sends nothing. Read the last
   timeline text afterward: your username plus the message means it went out, and the box goes empty.
+- **AlternativeTo app submission (verified 2026-11-03, hidden lease):** sign in with "Google" (Brave is not
+  logged into GitHub), pick the account, then "Keep <username>" and click the verify link from the Gmail it sends.
+  The form at /manage-item/ is React: set inputs with the native value setter, and select fields by
+  `input[name=..],textarea[name=..]` because a bare `[name=description]` hits the page's meta tag first.
+  Tags, platforms and author are react-select (`#react-select-<field>-input`; type, wait, mousedown the option).
+  Picking "Open source" requires `sourceUrl`. After submit comes /manage-add-alternatives/: suggestion cards are
+  `div[role=button]` (JS `.click()` toggles them; a trusted click on the name opens the app page instead), then
+  "Next: add from its alternatives", "Submit 1 alternative", and a $9 priority popup: click "No thanks, continue".
+  Do the whole thing in one lease; closing the tab loses unsaved picks.
 - **Reddit native video post with body text (verified 2026-10-31, 49 MB mp4, hidden lease):**
   PRAW's `submit_video` can't attach body text, so use the new Shreddit composer at
   `/r/<sub>/submit/?type=IMAGE`. It is one form (no tabs) with title, flair and body; the
