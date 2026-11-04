@@ -305,6 +305,11 @@ Rules for the list:
   Discard buttons only render after the textarea gets focus: call `ta.focus()`, dispatch
   `focus` + bubbling `focusin`, and `ta.click()`, then `button.click()` on "Publish reply".
   Success: the block shows "Edit reply" with the text; reload and read it back to confirm.
+  **Read-back trap (2026-11-04):** a reload a few seconds after Publish can still show the empty
+  textarea and "0 / 350" even though the reply posted. Do NOT post again; open a fresh lease, wait
+  ~20s and look for "Edit reply". The textarea disappears once a reply exists, so `review-reply
+  textarea` missing on a later visit means it is already answered. App list:
+  `/developers/<devId>/app-list` (the developer home does not link apps by name).
 
 ## Chat assistants (Grok, ChatGPT, Gemini, DeepSeek)
 
