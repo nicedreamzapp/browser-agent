@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+"""bb-desktop: borrow the virtual Mac instead of the human's real screen.
+
+Matt (2026-11-04, 9:45 PM): "You take it, then build." Some jobs cannot be done
+in a hidden tab (sites that refuse a background tab, native Mac apps, testing an
+app on a clean machine, tools we do not trust). Until now the only place left was
+his own screen. The mini runs a separate macOS guest under terminal-mac; this
+gives agents an exclusive, logged lease on it, with the same rules as the browser
+broker: one job at a time, look before every step, stuck means ask, give it back.
+The guest has none of Matt's logins.
+
+    bb-desktop lease   <owner> [--vm default] [--purpose "..."] [--ttl 1800]
+    bb-desktop act     <owner> [--vm default] click X Y [--double] [--button right]
+    bb-desktop act     <owner> key cmd+space
+    bb-desktop act     <owner> type "text"          (per-key presses; --native for terminal-mac's own type)
+    bb-desktop act     <owner> scroll --dy -300 [--dx N] [--x X --y Y]
+    bb-desktop act     <owner> drag X Y X2 Y2
+    bb-desktop act     <owner> screenshot [PATH]
+    bb-desktop renew   <owner> [--vm default]
+    bb-desktop peek    [--vm default]               read only: holder, purpose, expiry, VM state, fresh screenshot
+    bb-desktop release <owner> [--vm default]        ends the lease; the VM keeps running
+
+Every command prints one JSON line on stdout. A lease expires TTL seconds after
+the last act/renew and is then free to take. The lease state lives on the machine
+that owns the VM: on a machine without terminal-mac (the M5, the PC) the same
+command runs on the mini, LAN ssh first, then the VPS relay.
+
+Exit 0 ok · 1 error (terminal-mac failed, mini unreachable, bad usage) · 2 the VM or
+its guest helper is not ready · 3 you do not hold the lease · 4 another owner holds
+it (the reply says who and why) · 5 stuck: this owner leased and released it twice
+in the last 10 minutes; stop and ask the human in one line.
+"""
+import base64, fcntl, json, os, shlex, shutil, subprocess, sys, time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+STATE = os.environ.get("BB_DESKTOP_STATE", os.path.join(HERE, "desktop-lease.json"))
+LOG = os.environ.get("BB_DESKTOP_LOG", os.path.join(HERE, "desktop.log"))
+SHOTS = os.environ.get("BB_DESKTOP_SHOTS", "/tmp/bb-desktop")
+MINI = os.environ.get("BB_DESKTOP_MINI", "matthewmacosko@192.168.1.84")
+RELAY = os.environ.get("BB_DESKTOP_RELAY", "root@5.252.55.128")
+REMOTE_BIN = os.environ.get("BB_DESKTOP_REMOTE_BIN", "$HOME/Scripts/browser-agent/broker/bb-desktop")
+# terminal-mac 0.2.0 build 6: `action type` returns {} and types nothing in a macOS 27
+# guest, while `key <char>` works. Set BB_DESKTOP_NATIVE_TYPE=1 once upstream fixes it.
+NATIVE_TYPE = os.environ.get("BB_DESKTOP_NATIVE_TYPE") == "1"
+TTL = 1800
+STUCK_WINDOW, STUCK_AFTER = 600, 2
+
+
+class Exit(Exception):
+    def __init__(self, code, msg, **extra):
+        super().__init__(msg)
+        self.code, self.msg, self.extra = code, msg, extra
+
+
+# ---- the per-key typing path ------------------------------------------------
+# Key names terminal-mac accepts (Guest.swift `keys`, US layout). Shifted characters
+# are shift+<base key>. There is no key for ` and ~ in 0.2.0, so those are refused.
+_BASE = set("abcdefghijklmnopqrstuvwxyz0123456789=-][';\\,/.")
+_SHIFTED = {"!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6", "&": "7", "*": "8",
+            "(": "9", ")": "0", "_": "-", "+": "=", "{": "[", "}": "]", "|": "\\", ":": ";",
+            '"': "'", "<": ",", ">": ".", "?": "/"}
+_NAMED = {" ": "space", "\n": "return", "\t": "tab"}
+
+
+def keys_for(text):
+    """The terminal-mac key chords that type `text`, one per character. Raises Exit(1)
+    naming every character that has no key, before anything is sent."""
+    out, bad = [], []
+    for ch in text:
+        if ch in _NAMED:
+            out.append(_NAMED[ch])
+        elif ch in _BASE:
+            out.append(ch)
+        elif ch.isascii() and ch.isalpha() and ch.isupper():
+            out.append("shift+" + ch.lower())
+        elif ch in _SHIFTED:
+            out.append("shift+" + _SHIFTED[ch])
+        else:
+            bad.append(ch)
+    if bad:
+        raise Exit(1, "no key for %s; nothing was typed (use --native to try terminal-mac's own type)"
+                   % ", ".join(repr(c) for c in sorted(set(bad))))
+    return out
+
+
+# ---- where terminal-mac lives -------------------------------------------------
+def local_tmac():
+    """Path to terminal-mac on this machine, or None (then the mini runs the command)."""
+    forced = os.environ.get("BB_DESKTOP_TMAC")
+    if forced is not None:
+        return forced or None
+    return shutil.which("terminal-mac") or next(
+        (p for p in [os.path.expanduser("~/.local/bin/terminal-mac")] if os.access(p, os.X_OK)), None)
+
+
+def tmac(*args, timeout=60):
+    """Run terminal-mac; returns its JSON reply. Raises Exit(1) on failure."""
+    try:
+        p = subprocess.run([TMAC, *args], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise Exit(1, "terminal-mac %s timed out after %ss" % (" ".join(args[:3]), timeout))
+    try:
+        reply = json.loads(p.stdout) if p.stdout.strip() else {}
+    except ValueError:
+        reply = {"output": p.stdout.strip()}
+    if p.returncode != 0:
+        raise Exit(1, "terminal-mac %s failed: %s" % (" ".join(args[:3]), (p.stderr or p.stdout).strip()[:300]))
+    return reply
+
+
+# ---- lease state (one JSON file, flock'd) -------------------------------------
+class State:
+    def __enter__(self):
+        os.makedirs(os.path.dirname(STATE) or ".", exist_ok=True)
+        self.lock = open(STATE + ".lock", "a")
+        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        try:
+            with open(STATE) as f:
+                self.data = json.load(f)
+        except (OSError, ValueError):
+            self.data = {}
+        return self
+
+    def vm(self, name):
+        return self.data.setdefault(name, {"lease": None, "history": []})
+
+    def save(self):
+        tmp = STATE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.data, f, indent=1)
+        os.replace(tmp, STATE)
+
+    def __exit__(self, *a):
+        fcntl.flock(self.lock, fcntl.LOCK_UN)
+        self.lock.close()
+
+
+def log(line):
+    try:
+        with open(LOG, "a") as f:
+            f.write("[%s] %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), line))
+    except OSError:
+        pass
+
+
+def when(t):
+    return time.strftime("%H:%M:%S", time.localtime(t))
+
+
+def live(rec, vm, now):
+    """The lease if it is still unexpired, else None (and logs the expiry once)."""
+    lease = rec.get("lease")
+    if lease and lease["expires"] <= now:
+        log("vm=%s lease of %s (%s) expired at %s; free" % (vm, lease["owner"],
+                                                           lease.get("purpose") or "-", when(lease["expires"])))
+        rec["history"].append({"owner": lease["owner"], "leased": lease["start"], "released": lease["expires"],
+                               "expired": True})
+        rec["lease"] = None
+    return rec.get("lease")
+
+
+def holder_or_exit(st, vm, owner, now):
+    rec = st.vm(vm)
+    lease = live(rec, vm, now)
+    if not lease:
+        st.save()
+        raise Exit(3, "%s does not hold the desktop %s (it is free): run bb-desktop lease %s first" % (owner, vm, owner))
+    if lease["owner"] != owner:
+        raise Exit(3, "the desktop %s is leased by %s (%s), not %s" % (vm, lease["owner"], lease.get("purpose") or "-", owner),
+                   held_by=lease["owner"], purpose=lease.get("purpose"))
+    return rec, lease
+
+
+def check_ready(vm):
+    """Resume a paused VM; refuse unless the guest helper has both permissions."""
+    st = tmac("status", vm, timeout=30).get("state")
+    if st == "paused":
+        tmac("resume", vm, timeout=60)
+        log("vm=%s was paused; resumed" % vm)
+        st = "running"
+    if st != "running":
+        raise Exit(2, "the VM %s is %s, not running; ask the human before starting it (terminal-mac start %s)"
+                   % (vm, st, vm), vm_state=st)
+    try:
+        a = tmac("action", vm, "status", timeout=30)
+    except Exit as e:
+        raise Exit(2, "the guest helper in %s is not answering (%s); it needs setup inside the VM" % (vm, e.msg))
+    if str(a.get("accessibility")).lower() != "true" or str(a.get("screenRecording")).lower() != "true":
+        raise Exit(2, "the guest helper in %s is missing permissions (accessibility=%s, screenRecording=%s);"
+                   " the human must grant them inside the VM" % (vm, a.get("accessibility"), a.get("screenRecording")))
+    return a
+
+
+def shot_path(vm, label):
+    os.makedirs(SHOTS, exist_ok=True)
+    return os.path.join(SHOTS, "%s-%s-%s.png" % (vm, label, time.strftime("%Y%m%d-%H%M%S")))
+
+
+# ---- commands -------------------------------------------------------------------
+def opt(args, name, default=None, flag=False):
+    if name in args:
+        i = args.index(name)
+        if flag:
+            args.pop(i)
+            return True
+        if i + 1 >= len(args):
+            raise Exit(1, "%s needs a value" % name)
+        args.pop(i)
+        return args.pop(i)
+    return False if flag else default
+
+
+def cmd_lease(owner, args):
+    vm = opt(args, "--vm", "default")
+    purpose = opt(args, "--purpose")
+    ttl = int(opt(args, "--ttl", TTL))
+    now = time.time()
+    with State() as st:
+        rec = st.vm(vm)
+        lease = live(rec, vm, now)
+        if lease and lease["owner"] != owner:
+            st.save()
+            raise Exit(4, "the desktop %s is leased by %s for \"%s\" until %s; wait or ask"
+                       % (vm, lease["owner"], lease.get("purpose") or "-", when(lease["expires"])),
+                       held_by=lease["owner"], purpose=lease.get("purpose"), expires=lease["expires"])
+        if lease:   # already ours: renew, not a new lease
+            lease.update(expires=now + ttl, ttl=ttl, purpose=purpose or lease.get("purpose"))
+            st.save()
+            return {"leased": True, "already_yours": True, "vm": vm, "owner": owner, "expires": lease["expires"]}
+        rec["history"] = [h for h in rec["history"] if h["released"] > now - STUCK_WINDOW]
+        recent = [h for h in rec["history"] if h["owner"] == owner]
+        if len(recent) >= STUCK_AFTER:
+            st.save()
+            log("vm=%s owner=%s refused: stuck (%d leases in 10 min)" % (vm, owner, len(recent)))
+            raise Exit(5, "stuck: %s leased and released the desktop %s %d times in the last 10 minutes."
+                       " Stop and ask the human in one line what is wrong." % (owner, vm, len(recent)))
+        st.save()
+    status = check_ready(vm)    # outside the lock: it can take a few seconds
+    with State() as st:
+        rec = st.vm(vm)
+        lease = live(rec, vm, time.time())
+        if lease and lease["owner"] != owner:
+            raise Exit(4, "the desktop %s was just leased by %s" % (vm, lease["owner"]), held_by=lease["owner"])
+        now = time.time()
+        rec["lease"] = {"owner": owner, "purpose": purpose, "start": now, "expires": now + ttl, "ttl": ttl,
+                        "host": os.uname().nodename}
+        st.save()
+    log("vm=%s owner=%s leased ttl=%s purpose=%s" % (vm, owner, ttl, purpose or "-"))
+    return {"leased": True, "vm": vm, "owner": owner, "purpose": purpose, "expires": now + ttl,
+            "screen": [int(status.get("width", 1280)), int(status.get("height", 800))]}
+
+
+def cmd_renew(owner, args):
+    vm = opt(args, "--vm", "default")
+    with State() as st:
+        rec, lease = holder_or_exit(st, vm, owner, time.time())
+        lease["expires"] = time.time() + lease.get("ttl", TTL)
+        st.save()
+    return {"renewed": True, "vm": vm, "owner": owner, "expires": lease["expires"]}
+
+
+def cmd_release(owner, args):
+    vm = opt(args, "--vm", "default")
+    now = time.time()
+    with State() as st:
+        rec, lease = holder_or_exit(st, vm, owner, now)
+        rec["history"].append({"owner": owner, "leased": lease["start"], "released": now})
+        rec["lease"] = None
+        st.save()
+    log("vm=%s owner=%s released after %ds" % (vm, owner, now - lease["start"]))
+    return {"released": True, "vm": vm, "owner": owner}
+
+
+def cmd_act(owner, args):
+    vm = opt(args, "--vm", "default")
+    native = opt(args, "--native", flag=True) or NATIVE_TYPE
+    if not args:
+        raise Exit(1, "act needs a verb: click|key|type|scroll|drag|screenshot")
+    verb, rest = args[0], args[1:]
+    if verb not in ("click", "key", "type", "scroll", "drag", "screenshot", "move"):
+        raise Exit(1, "unknown act verb %s" % verb)
+    with State() as st:
+        rec, lease = holder_or_exit(st, vm, owner, time.time())
+        lease["expires"] = time.time() + lease.get("ttl", TTL)
+        st.save()
+    out = {"vm": vm, "owner": owner, "act": verb}
+    try:
+        if verb == "type":
+            text = rest[-1] if rest else ""
+            if rest[:1] == ["--text"] and len(rest) == 2:
+                text = rest[1]
+            what = "type len=%d%s" % (len(text), " native" if native else "")
+            if native:
+                tmac("action", vm, "type", "--", text)
+            else:
+                chords = keys_for(text)
+                for k in chords:
+                    tmac("action", vm, "key", k, timeout=20)
+            out["typed_chars"] = len(text)
+        elif verb == "screenshot":
+            path = rest[0] if rest else shot_path(vm, owner)
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            tmac("action", vm, "screenshot", "--output", path)
+            out["screenshot"] = path
+            what = "screenshot"
+        else:
+            out["reply"] = tmac("action", vm, verb, *rest)
+            what = " ".join([verb] + rest)[:80]
+        log("vm=%s owner=%s %s ok" % (vm, owner, what))
+    except Exit as e:
+        log("vm=%s owner=%s %s FAILED: %s" % (vm, owner, verb if verb != "type" else "type", e.msg[:120]))
+        raise
+    return out
+
+
+def cmd_peek(args):
+    vm = opt(args, "--vm", "default")
+    now = time.time()
+    with State() as st:
+        rec = st.vm(vm)
+        lease = live(rec, vm, now)
+        st.save()
+    out = {"vm": vm, "held_by": lease and lease["owner"], "purpose": lease and lease.get("purpose"),
+           "expires": lease and lease["expires"],
+           "seconds_left": lease and int(lease["expires"] - now)}
+    if not lease:
+        last = rec["history"][-1] if rec["history"] else None
+        out["free"] = True
+        if last:
+            out["last"] = "%s, %s at %s" % (last["owner"], "expired" if last.get("expired") else "released",
+                                             when(last["released"]))
+    out["vm_state"] = tmac("status", vm, timeout=30).get("state")
+    if out["vm_state"] == "running":
+        try:
+            path = shot_path(vm, "peek")
+            tmac("action", vm, "screenshot", "--output", path)
+            out["screenshot"] = path
+        except Exit as e:
+            out["screenshot_error"] = e.msg
+    return out
+
+
+# ---- running it on the mini -------------------------------------------------------
+def remote(argv):
+    """Run this same command on the mini. Screenshots come back to the same path here."""
+    argv = list(argv)
+    want_local = None
+    if argv[:1] == ["act"] and "screenshot" in argv:
+        i = argv.index("screenshot")
+        if i + 1 < len(argv):
+            want_local = argv.pop(i + 1)
+    script = ("export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; %s %s; echo __BBD_RC=$?"
+              % (REMOTE_BIN, " ".join(shlex.quote(a) for a in argv)))
+    timeout = 120 + (len(argv[-1]) if "type" in argv else 0)
+    out, how = run_on_mini(script, timeout)
+    lines = out.rstrip("\n").split("\n")
+    rc_line = next((l for l in reversed(lines) if l.startswith("__BBD_RC=")), None)
+    if rc_line is None:
+        raise Exit(1, "the mini gave no answer (%s): %s" % (how, out.strip()[-300:]))
+    rc = int(rc_line.split("=", 1)[1])
+    body = [l for l in lines if l.strip() and not l.startswith("__BBD_RC=")]
+    reply = next((json.loads(l) for l in reversed(body) if l.startswith("{")), {})
+    for l in body:
+        if not l.startswith("{"):
+            print(l, file=sys.stderr)
+    reply["ran_on"] = "mini via " + how
+    if reply.get("screenshot"):
+        local = want_local or reply["screenshot"]
+        fetch(reply["screenshot"], local)
+        reply["screenshot"] = local
+    return rc, reply
+
+
+def run_on_mini(script, timeout):
+    """(output, how). LAN ssh first; the VPS relay when the LAN is down. The command is
+    base64'd so no layer of quoting can mangle it."""
+    b64 = base64.b64encode(script.encode()).decode()
+    inner = "echo %s | base64 -d | /bin/zsh -l" % b64
+    try:
+        p = subprocess.run(["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", MINI, inner],
+                           capture_output=True, text=True, timeout=timeout)
+        if p.returncode != 255 and "__BBD_RC=" in p.stdout:
+            return p.stdout + p.stderr, "lan"
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        p = subprocess.run(["ssh", "-o", "ConnectTimeout=10", RELAY,
+                            "/root/fia-run-on.sh mini '%s' %d" % (inner, timeout)],
+                           capture_output=True, text=True, timeout=timeout + 30)
+    except subprocess.TimeoutExpired:
+        raise Exit(1, "the mini did not answer over the LAN or the relay within %ss" % timeout)
+    return p.stdout + p.stderr, "relay"
+
+
+def fetch(remote_path, local_path):
+    out, _ = run_on_mini("base64 -i %s; echo; echo __BBD_RC=$?" % shlex.quote(remote_path), 120)
+    data = "".join(l for l in out.split("\n") if l and not l.startswith("__BBD_RC="))
+    os.makedirs(os.path.dirname(os.path.abspath(local_path)), exist_ok=True)
+    with open(local_path, "wb") as f:
+        f.write(base64.b64decode(data))
+
+
+# ---- main -------------------------------------------------------------------------
+def main(argv):
+    global TMAC
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__, file=sys.stderr)
+        return 1
+    TMAC = local_tmac()
+    cmd = argv[0]
+    try:
+        if TMAC is None:
+            rc, reply = remote(argv)
+        else:
+            args = list(argv[1:])
+            if cmd == "peek":
+                reply = cmd_peek(args)
+            elif cmd in ("lease", "act", "renew", "release"):
+                if not args or args[0].startswith("-"):
+                    raise Exit(1, "usage: bb-desktop %s <owner> ..." % cmd)
+                owner = args.pop(0)
+                reply = {"lease": cmd_lease, "act": cmd_act, "renew": cmd_renew, "release": cmd_release}[cmd](owner, args)
+            else:
+                raise Exit(1, "unknown command %s (lease|act|renew|peek|release)" % cmd)
+            rc = 0
+    except Exit as e:
+        print(e.msg, file=sys.stderr)
+        rc, reply = e.code, dict(error=e.msg, **e.extra)
+    print(json.dumps(reply))
+    return rc
+
+
+TMAC = None
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

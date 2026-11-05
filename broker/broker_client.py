@@ -500,3 +500,104 @@ def stage():
     """Who has the screen right now, and what is on it."""
     with urlopen(BROKER + "/stage", timeout=10) as r:
         return json.load(r)
+
+
+# ---- desktop lease: the virtual Mac instead of the human's screen (2026-11-04) ----
+# Matt: "You take it, then build." For jobs a hidden tab cannot do (sites that refuse a
+# background tab, native Mac apps, clean-machine app tests, untrusted tools) agents borrow
+# the mini's terminal-mac guest. All logic lives in bb-desktop; this only shells out to it.
+BB_DESKTOP = os.path.join(os.path.dirname(os.path.realpath(__file__)), "bb-desktop")
+
+
+def _desktop(*args, timeout=600):
+    import subprocess
+    p = subprocess.run([sys.executable, BB_DESKTOP, *map(str, args)], capture_output=True, text=True,
+                       timeout=timeout)
+    lines = [l for l in p.stdout.splitlines() if l.startswith("{")]
+    reply = json.loads(lines[-1]) if lines else {}
+    if p.returncode == 0:
+        return reply
+    msg = reply.get("error") or p.stderr.strip() or "bb-desktop exit %d" % p.returncode
+    if p.returncode == 5:
+        raise StopAndAsk(msg)
+    if p.returncode == 4:
+        raise DesktopBusy(msg, reply)
+    raise RuntimeError(msg)
+
+
+class DesktopBusy(RuntimeError):
+    """Another owner holds the desktop. reply says who (held_by), why (purpose) and until when."""
+
+    def __init__(self, message, reply=None):
+        super().__init__(message)
+        self.reply = reply or {}
+
+
+class Desktop:
+    """A leased virtual Mac. Coordinates are guest points (1280x800), top-left origin,
+    the same as its screenshots. Look (screenshot) before every step."""
+
+    def __init__(self, owner, vm):
+        self.owner, self.vm = owner, vm
+
+    def _act(self, *args):
+        return _desktop("act", self.owner, "--vm", self.vm, *args)
+
+    def click(self, x, y, double=False, right=False):
+        extra = (["--double"] if double else []) + (["--button", "right"] if right else [])
+        return self._act("click", int(x), int(y), *extra)
+
+    def key(self, k):
+        return self._act("key", k)
+
+    def type(self, text, native=False):
+        return self._act("type", *(["--native"] if native else []), "--text", text)
+
+    def scroll(self, dy, dx=0, x=None, y=None):
+        extra = ["--dy", int(dy)] + (["--dx", int(dx)] if dx else [])
+        if x is not None and y is not None:
+            extra += ["--x", int(x), "--y", int(y)]
+        return self._act("scroll", *extra)
+
+    def drag(self, x, y, x2, y2):
+        return self._act("drag", int(x), int(y), int(x2), int(y2))
+
+    def screenshot(self, path=None):
+        """Save a PNG of the guest screen; returns its path."""
+        return self._act("screenshot", *([path] if path else []))["screenshot"]
+
+    def status(self):
+        """Who holds it, the purpose, expiry and VM state (read only, includes a fresh screenshot)."""
+        return _desktop("peek", "--vm", self.vm)
+
+
+@contextmanager
+def desktop_lease(owner, purpose=None, vm="default", ttl=1800):
+    """Hold the virtual Mac for one job, the same way lease() holds a tab:
+
+        with desktop_lease("app-test", purpose="clean install test") as d:
+            d.screenshot("/tmp/before.png"); d.click(640, 400); d.type("hello")
+
+    Renews while you work and releases on exit, exceptions included. Raises DesktopBusy
+    when someone else holds it and StopAndAsk when this owner is looping."""
+    args = ["lease", owner, "--vm", vm, "--ttl", int(ttl)] + (["--purpose", purpose] if purpose else [])
+    _desktop(*args)
+    stop = threading.Event()
+
+    def keepalive():
+        while not stop.wait(max(30, min(300, ttl // 3))):
+            try:
+                _desktop("renew", owner, "--vm", vm, timeout=180)
+            except Exception as e:
+                _log(f"desktop renew failed for {owner}: {e}")
+
+    t = threading.Thread(target=keepalive, daemon=True)
+    t.start()
+    try:
+        yield Desktop(owner, vm)
+    finally:
+        stop.set()
+        try:
+            _desktop("release", owner, "--vm", vm, timeout=180)
+        except Exception as e:
+            _log(f"desktop release failed for {owner}: {e}")

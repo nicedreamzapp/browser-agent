@@ -296,6 +296,39 @@ Python 3.9+. `proxy.py` needs [`websockets`](https://github.com/python-websocket
 
 Localhost only, no auth. Anything that can reach `127.0.0.1:9223` can drive your logged-in browser — which is already true of `127.0.0.1:9222` the moment you enable remote debugging. Don't expose either.
 
+### 🖥️ Desktop lease: a virtual Mac instead of the human's screen
+
+**The problem.** Some jobs cannot be done in a hidden tab: a site that refuses to work in a
+background tab, a native Mac app, a test of an app on a clean machine, a tool we do not trust.
+Until now the only place left for those was the human's own screen.
+
+**What the tool does.** `bb-desktop` lends agents a separate macOS guest run by
+[terminal-mac](https://github.com/govijr/terminal-mac), one owner at a time, with the same rules
+as tabs: look before every step, stuck means ask, give it back when done. The guest has none of
+the human's logins, and its mouse and keyboard are not his.
+
+```bash
+bb-desktop lease  my-agent --purpose "clean install test"   # exit 4: someone else has it (says who and why)
+bb-desktop act    my-agent screenshot /tmp/guest.png         # look first; guest points, 1280x800, top-left
+bb-desktop act    my-agent click 640 400
+bb-desktop act    my-agent type "Hello there."               # sent key by key
+bb-desktop peek                                              # read only: holder, purpose, expiry, fresh screenshot
+bb-desktop release my-agent                                  # the VM keeps running
+```
+
+```python
+from broker_client import desktop_lease
+with desktop_lease("my-agent", purpose="clean install test") as d:
+    d.screenshot("/tmp/before.png"); d.click(640, 400); d.type("Hello there.")
+```
+
+A lease lasts `--ttl` seconds (1800) past the last action, then it is free to take. The same owner
+leasing and releasing it twice in 10 minutes is refused with exit 5: stop and ask. Every action is
+one line in `desktop.log` (typed text is logged by length only). The lease state lives on the
+machine that runs the VM; on a machine without terminal-mac the command runs there over ssh.
+`type` sends one key press per character because terminal-mac 0.2.0's own `type` does nothing in a
+macOS 27 guest; `--native` or `BB_DESKTOP_NATIVE_TYPE=1` switches back once that is fixed.
+
 ### 🎞️ Broker Recorder (opt-in): every job becomes training data
 
 Off by default. With `BROKER_RECORD=1` (or `"record": true` on one `/lease`, or `X-Broker-Record: 1` on one CDP websocket), each job is written to `~/.local/broker-recordings` as a JSONL trajectory: semantic actions (navigate, click, type, key, scroll, select, upload, js), the element acted on, a compact snapshot of the page before the step, the result, and whether the agent or the human did it. Passwords, card and one-time-code fields, cookies, auth headers, tokens in URLs, emails and phones are scrubbed before anything touches disk, and recording runs on its own thread so CDP traffic never waits for it. `python3 record_export.py -o train.jsonl` turns recordings into SFT data for small vision models. Schema, scrubbing rules and known gaps: [docs/trajectory-schema.md](docs/trajectory-schema.md).
