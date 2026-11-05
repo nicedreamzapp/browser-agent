@@ -31,7 +31,9 @@ reap while its CPU is busy (someone is working in it). A VM the broker did not w
 its 10 minutes counted from the first time reap sees it running.
 
 Lease also takes a cleanly stopped VM: it starts it, and the guest logs in by itself and
-opens its helper (allow up to ~3 minutes). A VM in any other state (error, starting,
+opens its helper (allow up to ~3 minutes). Not one a person stopped on purpose: terminal-mac
+`stop` (without --by-broker) marks it stoppedBy=human, and lease exits 2 for it until someone
+starts it again. The broker's own release suspends, never stops, so it leaves no mark. A VM in any other state (error, starting,
 stopping) or a saved state terminal-mac refuses to restore exits 2: ask the human.
 BB_DESKTOP_SUSPEND=0 (or 1) overrides the suspend capability read from terminal-mac --help.
 
@@ -391,6 +393,10 @@ def check_ready(vm, deadline=None):
         st = wait_state(vm, "running", left(deadline, 120))
         woke = True
     elif st == "stopped":
+        # A person's `terminal-mac stop` leaves stoppedBy=human: that VM is theirs to start.
+        if tmac("status", vm, timeout=left(deadline, 30)).get("stoppedBy") == "human":
+            raise Exit(2, "the VM %s was stopped on purpose by a person (terminal-mac stop); ask the human"
+                       " before starting it" % vm, vm_state=st, stopped_by="human")
         tmac("start", vm, timeout=left(deadline, 180))
         st = wait_state(vm, "running", left(deadline, 120))
         log("vm=%s was stopped; started it (%s)" % (vm, st))

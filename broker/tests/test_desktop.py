@@ -28,9 +28,19 @@ if a[0] == "restore":
         print("terminal-mac: " + os.environ["FAKE_TMAC_RESTORE_ERR"], file=sys.stderr); sys.exit(1)
     open(os.environ["FAKE_TMAC_STATE"], "w").write("running"); print("{}"); sys.exit(0)
 if a[0] == "start":
+    if os.path.exists(os.environ["FAKE_TMAC_STATE"] + ".human"):
+        os.remove(os.environ["FAKE_TMAC_STATE"] + ".human")
     open(os.environ["FAKE_TMAC_STATE"], "w").write("running"); print("{}"); sys.exit(0)
 if a[0] == "status":
-    print(json.dumps({"name": a[1], "state": vm_state})); sys.exit(0)
+    out = {"name": a[1], "state": vm_state}
+    human = os.environ["FAKE_TMAC_STATE"] + ".human"
+    if vm_state == "stopped" and os.path.exists(human):
+        out["stoppedBy"] = "human"
+    print(json.dumps(out)); sys.exit(0)
+if a[0] == "stop":
+    if "--by-broker" not in a:
+        open(os.environ["FAKE_TMAC_STATE"] + ".human", "w").write("1")
+    open(os.environ["FAKE_TMAC_STATE"], "w").write("stopped"); print("{}"); sys.exit(0)
 if a[0] == "resume":
     open(os.environ["FAKE_TMAC_STATE"], "w").write("running"); print("{}"); sys.exit(0)
 if a[0] == "pause":
@@ -896,3 +906,27 @@ def test_suspend_capability_comes_from_help_unless_forced(env):
     run(dict(e, BB_DESKTOP_SUSPEND="0"), "lease", "b")
     run(dict(e, BB_DESKTOP_SUSPEND="0"), "release", "b")
     assert ["pause", "default"] in calls(env) and ["suspend", "default"] not in calls(env)
+
+
+def test_a_vm_a_person_stopped_is_never_started_by_lease(env):
+    """terminal-mac stop (a person) marks the VM; lease asks instead of booting it."""
+    tm = os.path.join(env["tmp"], "bin", "terminal-mac")
+    subprocess.run([tm, "stop", "default"], env=env, check=True, capture_output=True)
+    clear_calls(env)
+    rc, r, err = run(env, "lease", "a")
+    assert rc == 2 and r.get("stopped_by") == "human" and "stopped on purpose" in err
+    assert ["start", "default"] not in calls(env)
+    # a person starting it again clears the mark; a later lease works normally
+    subprocess.run([tm, "start", "default"], env=env, check=True, capture_output=True)
+    assert run(env, "lease", "b")[0] == 0
+    run(env, "release", "b")
+
+
+def test_a_stop_by_the_broker_or_a_guest_shutdown_leaves_no_mark(env):
+    tm = os.path.join(env["tmp"], "bin", "terminal-mac")
+    subprocess.run([tm, "stop", "default", "--by-broker"], env=env, check=True, capture_output=True)
+    rc, r, _ = run(env, "lease", "a")
+    assert rc == 0 and ["start", "default"] in calls(env)
+    run(env, "release", "a")
+    # release suspends or pauses, it never stops the VM
+    assert [c for c in calls(env) if c[0] == "stop"] == [["stop", "default", "--by-broker"]]
