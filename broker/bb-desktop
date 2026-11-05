@@ -30,6 +30,11 @@ never paused while a lease is live, while a `terminal-mac view` viewer is attach
 reap while its CPU is busy (someone is working in it). A VM the broker did not wake gets
 its 10 minutes counted from the first time reap sees it running.
 
+Lease also takes a cleanly stopped VM: it starts it, and the guest logs in by itself and
+opens its helper (allow up to ~3 minutes). A VM in any other state (error, starting,
+stopping) or a saved state terminal-mac refuses to restore exits 2: ask the human.
+BB_DESKTOP_SUSPEND=0 (or 1) overrides the suspend capability read from terminal-mac --help.
+
 Every command prints one JSON line on stdout. A lease expires TTL seconds after
 the last act/renew and is then free to take. The lease state lives on the machine
 that owns the VM: on a machine without terminal-mac (the M5, the PC) the same
@@ -89,7 +94,7 @@ CPU_BUSY = float(os.environ.get("BB_DESKTOP_CPU_BUSY", "10"))   # % across two s
 LOCK_WAIT = float(os.environ.get("BB_DESKTOP_LOCK_WAIT", "20"))
 SUSPENDING_STALE = 600     # a "suspending" mark older than this is from a killed run
 REQUEST_KEEP = 3600        # how long the host remembers a finished remote request
-LEASE_BUDGET = 900         # suspend wait 300 + restore 180 + boot 120 + helper 60 + status calls, with slack
+LEASE_BUDGET = 900         # suspend wait 300 + restore/start 180 + boot 120 + helper 180 (cold) + status calls
 MCP_IDLE = float(os.environ.get("BB_DESKTOP_MCP_IDLE", "600"))
 
 
@@ -357,11 +362,16 @@ NO_SAVED_STATE = re.compile(r"no (saved|suspended)[ -]?(machine )?state|nothing 
 
 
 def check_ready(vm, deadline=None):
-    """Wake a paused or suspended VM; refuse unless the guest helper has both permissions.
-    Every wait is cut to end before `deadline` (what is left of the lease's budget)."""
+    """Wake a paused, suspended or cleanly stopped VM; refuse unless the guest helper has both
+    permissions. Every wait is cut to end before `deadline` (what is left of the lease's budget).
+
+    A stopped VM is cold-booted: its guest logs in by itself (auto-login) and starts the helper
+    at login, and terminal-mac's `stop` only reports stopped once the guest has really shut down.
+    Unknown, transitional or broken states (error, starting, stopping, a restore refused for any
+    reason but a missing state, such as a disk that changed since the save) stay the human's call."""
     deadline = deadline or time.time() + 420
     st, _ = vm_status(vm)
-    woke = False
+    woke = cold = False
     if st == "paused":
         tmac("resume", vm, timeout=left(deadline, 60))
         log("vm=%s was paused; resumed" % vm)
@@ -369,23 +379,29 @@ def check_ready(vm, deadline=None):
     elif st == "suspended" or (st == "stopped" and flag(vm, "suspended")):
         try:
             tmac("restore", vm, timeout=left(deadline, 180))
+            log("vm=%s was suspended; restored" % vm)
         except Exit as e:
-            # A plain start only when terminal-mac itself says the VM is suspended but has no
-            # saved state. A stopped VM with just our flag may have been shut down on purpose.
-            if st != "suspended" or not NO_SAVED_STATE.search(e.msg):
+            # A plain start only when there is no saved state to lose: every other restore
+            # failure (a mismatched or damaged state is kept by terminal-mac) is the human's call.
+            if not NO_SAVED_STATE.search(e.msg):
                 raise Exit(2, "could not restore the VM %s (%s, %s); ask the human" % (vm, st, e.msg), vm_state=st)
             log("vm=%s had no saved state to restore; starting it" % vm)
             tmac("start", vm, timeout=left(deadline, 180))
+            cold = True
         st = wait_state(vm, "running", left(deadline, 120))
-        log("vm=%s was suspended; restored (%s)" % (vm, st))
         woke = True
+    elif st == "stopped":
+        tmac("start", vm, timeout=left(deadline, 180))
+        st = wait_state(vm, "running", left(deadline, 120))
+        log("vm=%s was stopped; started it (%s)" % (vm, st))
+        woke = cold = True
     if st == "running":
         mark(vm, suspended=None, **({"ours": True} if woke else {}))
     if st != "running":
-        raise Exit(2, "the VM %s is %s, not running; ask the human before starting it (terminal-mac start %s)"
-                   % (vm, st, vm), vm_state=st)
-    # A just-woken guest may need a few seconds before its helper answers again.
-    end = min(deadline, time.time() + (60 if woke else 0))
+        raise Exit(2, "the VM %s is %s, not running or stopped; ask the human" % (vm, st), vm_state=st)
+    # A just-woken guest may need a few seconds before its helper answers again; a cold boot
+    # needs the guest to boot, log in and launch the helper.
+    end = min(deadline, time.time() + (180 if cold else 60 if woke else 0))
     while True:
         try:
             a = tmac("action", vm, "status", timeout=left(deadline, 30))

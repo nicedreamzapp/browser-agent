@@ -159,9 +159,10 @@ def test_paused_vm_is_resumed_and_missing_permissions_refused(env, tmp_path):
     e = dict(env, FAKE_TMAC_PERMS="false")
     rc, r, err = run(e, "lease", "b")
     assert rc == 2 and "permission" in err
-    open(env["FAKE_TMAC_STATE"], "w").write("stopped")
+    # a broken or transitional state is never ours to fix
+    open(env["FAKE_TMAC_STATE"], "w").write("error")
     rc, r, err = run(env, "lease", "c")
-    assert rc == 2 and r["vm_state"] == "stopped"
+    assert rc == 2 and r["vm_state"] == "error" and "ask the human" in err
 
 
 def test_type_mapping():
@@ -377,7 +378,7 @@ def test_suspend_when_terminal_mac_has_it_and_lease_restores(env):
     assert sum(1 for x in calls(env) if x == ["--help"]) == 0
 
 
-def test_pause_fallback_without_suspend_and_stopped_vm_still_refused(env):
+def test_pause_fallback_without_suspend_and_stopped_vm_is_started(env):
     run(env, "lease", "a")
     run(env, "release", "a")
     assert ["--help"] in calls(env)
@@ -385,10 +386,14 @@ def test_pause_fallback_without_suspend_and_stopped_vm_still_refused(env):
     assert vm_state(env) == "paused"
     assert run(env, "lease", "b")[0] == 0 and vm_state(env) == "running"
     run(env, "release", "b")
-    # a VM we did not suspend that is stopped is not ours to start
+    # a cleanly stopped VM is cold-booted (auto-login brings the helper up), never restored
     open(env["FAKE_TMAC_STATE"], "w").write("stopped")
+    clear_calls(env)
     rc, r, _ = run(env, "lease", "c")
-    assert rc == 2 and r["vm_state"] == "stopped" and ["restore", "default"] not in calls(env)
+    assert rc == 0 and vm_state(env) == "running" and ["restore", "default"] not in calls(env)
+    c = calls(env)
+    assert c.index(["start", "default"]) < c.index(["action", "default", "status"])
+    assert "was stopped; started it" in open(env["BB_DESKTOP_LOG"]).read()
 
 
 def test_reap_and_expiry_suspend_too(env):
@@ -525,11 +530,16 @@ def test_restore_failure_refuses_unless_there_is_no_saved_state(env):
     clear_calls(env)
     rc, r, err = run(dict(e, FAKE_TMAC_RESTORE_ERR="the disk image is busy"), "lease", "b")
     assert rc == 2 and "ask the human" in err and ["start", "default"] not in calls(env)
-    # C: stopped with only our flag never falls back to start, even on "no saved state"
-    rc, r, err = run(dict(e, FAKE_TMAC_RESTORE_ERR="No saved state for default"), "lease", "c")
+    # a saved state terminal-mac keeps because the disk changed is the human's call too
+    rc, r, err = run(dict(e, FAKE_TMAC_RESTORE_ERR="The suspended state does not match this VM (changed: disk)"), "lease", "b2")
     assert rc == 2 and "ask the human" in err and ["start", "default"] not in calls(env)
-    # ... only terminal-mac's own "suspended" state does
+    # stopped with our flag and no saved state left: nothing to lose, so it is started
+    rc, r, err = run(dict(e, FAKE_TMAC_RESTORE_ERR="VM 'default' has no suspended state. Use terminal-mac start default."), "lease", "c")
+    assert rc == 0 and ["start", "default"] in calls(env) and vm_state(env) == "running"
+    run(e, "release", "c")
+    # ... and so is terminal-mac's own "suspended" state without a state file
     open(env["FAKE_TMAC_STATE"], "w").write("suspended")
+    clear_calls(env)
     rc, r, _ = run(dict(e, FAKE_TMAC_RESTORE_ERR="No saved state for default"), "lease", "d")
     assert rc == 0 and ["start", "default"] in calls(env) and vm_state(env) == "running"
 
@@ -842,3 +852,47 @@ def test_mcp_bad_arguments_never_take_the_lease(env):
     finally:
         p.stdin.close()
         p.wait(20)
+
+
+# ---- 2026-11-05: lease takes a cleanly stopped VM ------------------------------------
+def test_lease_starts_a_stopped_vm_and_waits_for_its_helper(env, tmp_path):
+    """A cold boot: the helper answers only after the guest has logged in."""
+    open(env["FAKE_TMAC_STATE"], "w").write("stopped")
+    late = tmp_path / "late-helper"
+    late.write_text("2")      # the first two status calls fail, like a guest still logging in
+    wrapper = tmp_path / "bin2" / "terminal-mac"
+    wrapper.parent.mkdir()
+    wrapper.write_text("""#!/bin/bash
+if [[ "$1" = action && "$3" = status ]]; then
+  n=$(cat %s); if (( n > 0 )); then echo $((n-1)) > %s; echo "terminal-mac: Timed out waiting for status" >&2; exit 1; fi
+fi
+exec %s "$@"
+""" % (late, late, os.path.join(os.path.dirname(env["BB_DESKTOP_TMAC"]), "terminal-mac")))
+    wrapper.chmod(0o755)
+    e = dict(env, BB_DESKTOP_TMAC=str(wrapper))
+    rc, r, _ = run(e, "lease", "a")
+    assert rc == 0 and r["leased"] and vm_state(env) == "running"
+    assert late.read_text().strip() == "0"
+    assert ["start", "default"] in calls(env)
+
+
+def test_lease_refuses_transitional_and_unknown_states(env):
+    for state in ("starting", "stopping", "unknown"):
+        open(env["FAKE_TMAC_STATE"], "w").write(state)
+        clear_calls(env)
+        rc, r, err = run(env, "lease", "a-" + state)
+        assert rc == 2 and r["vm_state"] == state
+        assert ["start", "default"] not in calls(env) and ["restore", "default"] not in calls(env)
+
+
+def test_suspend_capability_comes_from_help_unless_forced(env):
+    e = dict(env, FAKE_TMAC_SUSPEND="1")
+    e.pop("BB_DESKTOP_SUSPEND", None)
+    run(e, "lease", "a")
+    run(e, "release", "a")
+    assert ["suspend", "default"] in calls(env)
+    open(env["FAKE_TMAC_STATE"], "w").write("running")
+    clear_calls(env)
+    run(dict(e, BB_DESKTOP_SUSPEND="0"), "lease", "b")
+    run(dict(e, BB_DESKTOP_SUSPEND="0"), "release", "b")
+    assert ["pause", "default"] in calls(env) and ["suspend", "default"] not in calls(env)
