@@ -36,7 +36,7 @@ its guest helper is not ready · 3 you do not hold the lease · 4 another owner 
 it (the reply says who and why) · 5 stuck: this owner leased and released it twice
 in the last 10 minutes; stop and ask the human in one line.
 """
-import base64, fcntl, json, os, shlex, shutil, subprocess, sys, time
+import base64, json, os, shlex, shutil, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 STATE = os.environ.get("BB_DESKTOP_STATE", os.path.join(HERE, "desktop-lease.json"))
@@ -118,6 +118,8 @@ def tmac(*args, timeout=60):
 # ---- lease state (one JSON file, flock'd) -------------------------------------
 class State:
     def __enter__(self):
+        import fcntl    # here, not at the top: Windows has no fcntl and only ever runs the remote path
+        self.fcntl = fcntl
         os.makedirs(os.path.dirname(STATE) or ".", exist_ok=True)
         self.lock = open(STATE + ".lock", "a")
         fcntl.flock(self.lock, fcntl.LOCK_EX)
@@ -138,7 +140,7 @@ class State:
         os.replace(tmp, STATE)
 
     def __exit__(self, *a):
-        fcntl.flock(self.lock, fcntl.LOCK_UN)
+        self.fcntl.flock(self.lock, self.fcntl.LOCK_UN)
         self.lock.close()
 
 
