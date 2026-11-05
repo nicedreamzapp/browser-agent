@@ -930,3 +930,18 @@ def test_a_stop_by_the_broker_or_a_guest_shutdown_leaves_no_mark(env):
     run(env, "release", "a")
     # release suspends or pauses, it never stops the VM
     assert [c for c in calls(env) if c[0] == "stop"] == [["stop", "default", "--by-broker"]]
+
+
+def test_a_person_stop_wins_over_an_old_suspended_flag(env):
+    """Live bug 11/5: our own "suspended" flag sent lease down the restore path, whose
+    no-saved-state fallback booted a VM a person had stopped."""
+    e = dict(env, FAKE_TMAC_SUSPEND="1")
+    run(e, "lease", "a")
+    run(e, "release", "a")
+    assert state_of(env)["suspended"] is True
+    tm = os.path.join(env["tmp"], "bin", "terminal-mac")
+    subprocess.run([tm, "stop", "default"], env=e, check=True, capture_output=True)
+    clear_calls(env)
+    rc, r, err = run(dict(e, FAKE_TMAC_RESTORE_ERR="VM 'default' has no suspended state."), "lease", "b")
+    assert rc == 2 and r.get("stopped_by") == "human"
+    assert ["start", "default"] not in calls(env) and ["restore", "default"] not in calls(env)

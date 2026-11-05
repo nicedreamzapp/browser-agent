@@ -374,6 +374,11 @@ def check_ready(vm, deadline=None):
     deadline = deadline or time.time() + 420
     st, _ = vm_status(vm)
     woke = cold = False
+    # A person's `terminal-mac stop` leaves stoppedBy=human: that VM is theirs to start, whatever
+    # this broker remembers about it (an old "suspended" flag included).
+    if st == "stopped" and tmac("status", vm, timeout=left(deadline, 30)).get("stoppedBy") == "human":
+        raise Exit(2, "the VM %s was stopped on purpose by a person (terminal-mac stop); ask the human"
+                   " before starting it" % vm, vm_state=st, stopped_by="human")
     if st == "paused":
         tmac("resume", vm, timeout=left(deadline, 60))
         log("vm=%s was paused; resumed" % vm)
@@ -393,10 +398,6 @@ def check_ready(vm, deadline=None):
         st = wait_state(vm, "running", left(deadline, 120))
         woke = True
     elif st == "stopped":
-        # A person's `terminal-mac stop` leaves stoppedBy=human: that VM is theirs to start.
-        if tmac("status", vm, timeout=left(deadline, 30)).get("stoppedBy") == "human":
-            raise Exit(2, "the VM %s was stopped on purpose by a person (terminal-mac stop); ask the human"
-                       " before starting it" % vm, vm_state=st, stopped_by="human")
         tmac("start", vm, timeout=left(deadline, 180))
         st = wait_state(vm, "running", left(deadline, 120))
         log("vm=%s was stopped; started it (%s)" % (vm, st))
