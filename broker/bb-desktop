@@ -847,9 +847,13 @@ class McpSession:
         self.act("screenshot", path)
         w, h = self.screen
         jpg = path[:-4] + ".jpg"
-        conv = subprocess.run(["/usr/bin/sips", "-s", "format", "jpeg", "-s", "formatOptions", "85",
-                               "-z", str(h), str(w), path, "--out", jpg], capture_output=True, text=True)
-        if conv.returncode == 0 and os.path.exists(jpg):
+        try:    # point-sized JPEG like terminal-mac's own MCP; sips is macOS only
+            ok = subprocess.run(["/usr/bin/sips", "-s", "format", "jpeg", "-s", "formatOptions", "85",
+                                 "-z", str(h), str(w), path, "--out", jpg], capture_output=True,
+                                text=True, timeout=30).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            ok = False
+        if ok and os.path.exists(jpg):
             data, mime = open(jpg, "rb").read(), "image/jpeg"
             os.remove(jpg)
         else:

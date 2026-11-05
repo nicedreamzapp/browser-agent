@@ -1,5 +1,5 @@
 """bb-desktop: the desktop lease on the virtual Mac, against a fake terminal-mac on PATH."""
-import base64, fcntl, importlib.machinery, importlib.util, json, os, stat, subprocess, sys, time
+import base64, fcntl, importlib.machinery, importlib.util, json, os, shutil, stat, subprocess, sys, time
 
 import pytest
 
@@ -57,7 +57,9 @@ if a[0] == "action":
         perm = os.environ.get("FAKE_TMAC_PERMS", "true")
         print(json.dumps({"accessibility": perm, "screenRecording": "true", "width": "1280", "height": "800"}))
     elif verb == "screenshot":
-        open(a[a.index("--output") + 1], "wb").write(b"\x89PNG fake")
+        import base64 as b64    # a real 1x1 PNG, so image tools on any runner can read it
+        open(a[a.index("--output") + 1], "wb").write(b64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
         print(json.dumps({"path": a[a.index("--output") + 1]}))
     elif verb == "key" and a[3] == "fail":
         print("Unknown key", file=sys.stderr); sys.exit(1)
@@ -702,7 +704,9 @@ def mcp_session(env, *msgs, idle=None):
 def mcp_call(p, mid, method, params=None):
     p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": mid, "method": method, "params": params or {}}) + "\n")
     p.stdin.flush()
-    return json.loads(p.stdout.readline())
+    line = p.stdout.readline()
+    assert line.strip(), "the MCP server sent no reply (exit code %s)" % p.poll()
+    return json.loads(line)
 
 
 def test_G2_mcp_serves_terminal_macs_tools_behind_a_lease(env):
@@ -726,7 +730,14 @@ def test_G2_mcp_serves_terminal_macs_tools_behind_a_lease(env):
         assert calls(env)[-2:] == [["action", "default", "click", "5", "6", "--button", "right", "--double"],
                                    ["action", "default", "click", "5", "6", "--button", "right", "--count", "3"]]
         r = mcp_call(p, 6, "tools/call", {"name": "screenshot", "arguments": {}})
-        assert r["result"]["content"][0]["type"] == "image" and r["result"]["content"][0]["data"]
+        img = r["result"]["content"][0]
+        assert img["type"] == "image", r
+        # a point-sized JPEG where sips exists (macOS), the PNG itself where it does not (CI on Linux)
+        data = base64.b64decode(img["data"])
+        if shutil.which("sips") or os.path.exists("/usr/bin/sips"):
+            assert img["mimeType"] == "image/jpeg" and data[:2] == b"\xff\xd8"
+        else:
+            assert img["mimeType"] == "image/png" and data.startswith(b"\x89PNG")
         assert state_of(env)["lease"]["expires"] >= lease["expires"]       # renewed by each call
         # another agent is refused while the MCP session holds it
         assert run(env, "lease", "other")[0] == 4
