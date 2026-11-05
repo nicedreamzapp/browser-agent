@@ -69,7 +69,7 @@ def env(tmp_path):
              BB_DESKTOP_STATE=str(tmp_path / "lease.json"), BB_DESKTOP_LOG=str(tmp_path / "desktop.log"),
              BB_DESKTOP_SHOTS=str(tmp_path / "shots"), BB_DESKTOP_TMAC=str(fake),
              BB_DESKTOP_PS_FILE=str(tmp_path / "ps.txt"), BB_DESKTOP_CPU="0",
-             BB_DESKTOP_CONFIG=str(tmp_path / "no-config.env"))
+             BB_DESKTOP_CONFIG=str(tmp_path / "no-config.env"), TERMINAL_MAC_HOME=str(tmp_path / "tmhome"))
     for k in ("BB_DESKTOP_MINI", "BB_DESKTOP_RELAY", "BB_DESKTOP_RELAY_RUN", "BB_DESKTOP_SUSPEND",
               "BB_DESKTOP_REQUEST_ID", "BB_DESKTOP_IDLE", "BB_DESKTOP_LOCK_WAIT"):
         e.pop(k, None)
@@ -459,10 +459,14 @@ def test_suspend_runs_outside_the_lock_with_the_flag_set_first(env):
 
 def test_act_refused_while_suspending_and_stale_mark_ignored(env):
     run(env, "lease", "a")
-    edit_state(env, suspending={"since": time.time(), "how": "suspend"})
+    edit_state(env, suspending={"since": time.time(), "how": "suspend", "pid": os.getpid()})
     rc, r, err = run(env, "act", "a", "key", "a")
     assert rc == 2 and "being suspended" in err
-    edit_state(env, suspending={"since": time.time() - 3600, "how": "suspend"})
+    edit_state(env, suspending={"since": time.time() - 3600, "how": "suspend", "pid": os.getpid()})
+    assert run(env, "act", "a", "key", "a")[0] == 0
+    # E: a mark whose process is gone is stale straight away
+    dead = subprocess.Popen(["true"]); dead.wait()
+    edit_state(env, suspending={"since": time.time(), "how": "suspend", "pid": dead.pid})
     assert run(env, "act", "a", "key", "a")[0] == 0
 
 
@@ -505,7 +509,12 @@ def test_restore_failure_refuses_unless_there_is_no_saved_state(env):
     clear_calls(env)
     rc, r, err = run(dict(e, FAKE_TMAC_RESTORE_ERR="the disk image is busy"), "lease", "b")
     assert rc == 2 and "ask the human" in err and ["start", "default"] not in calls(env)
-    rc, r, _ = run(dict(e, FAKE_TMAC_RESTORE_ERR="No saved state for default"), "lease", "c")
+    # C: stopped with only our flag never falls back to start, even on "no saved state"
+    rc, r, err = run(dict(e, FAKE_TMAC_RESTORE_ERR="No saved state for default"), "lease", "c")
+    assert rc == 2 and "ask the human" in err and ["start", "default"] not in calls(env)
+    # ... only terminal-mac's own "suspended" state does
+    open(env["FAKE_TMAC_STATE"], "w").write("suspended")
+    rc, r, _ = run(dict(e, FAKE_TMAC_RESTORE_ERR="No saved state for default"), "lease", "d")
     assert rc == 0 and ["start", "default"] in calls(env) and vm_state(env) == "running"
 
 
@@ -565,3 +574,166 @@ def test_unquoted_words_are_all_typed(env):
     rc, r, _ = run(env, "act", "a", "type", "hi", "you")
     assert rc == 0 and r["typed_chars"] == 6
     assert [c[3] for c in calls(env)] == ["h", "i", "space", "y", "o", "u"]
+
+
+# ---- round 2 review fixes ------------------------------------------------------------
+def test_A_failed_suspend_keeps_the_flag_unless_the_vm_is_still_running(env, tmp_path):
+    # the suspend fails but the VM went down anyway (it may have saved): the flag stays
+    fake = tmp_path / "bin" / "terminal-mac"
+    src = fake.read_text().replace('''    if os.environ.get("FAKE_TMAC_SUSPEND_FAIL"):''', '''    if os.environ.get("FAKE_TMAC_SUSPEND_FAIL") == "down":
+        open(os.environ["FAKE_TMAC_STATE"], "w").write("stopped"); sys.exit(1)
+    if os.environ.get("FAKE_TMAC_SUSPEND_FAIL"):''')
+    fake.write_text(src)
+    e = dict(env, FAKE_TMAC_SUSPEND="1", FAKE_TMAC_SUSPEND_FAIL="down")
+    run(e, "lease", "a")
+    rc, r, _ = run(e, "release", "a")
+    assert str(r["paused"]).startswith("pause failed")
+    assert state_of(env)["suspended"] is True and "suspending" not in state_of(env)
+
+
+def test_B_lease_budget_and_a_lease_that_finished_after_the_caller_gave_up_is_reused(env):
+    m = load_module()
+    assert m.budget(["lease", "a"]) >= 300 + 180 + 120 + 60 + 60
+    import broker_client as bc
+    assert bc._desktop_timeout(["lease", "a"]) > m.budget(["lease", "a"]) + 30
+    # the caller timed out, but the lease landed on the host: the same owner just gets it back
+    assert run(env, "lease", "slow")[0] == 0
+    for _ in range(3):
+        rc, r, _ = run(env, "lease", "slow")
+        assert rc == 0 and r.get("already_yours")
+    assert not state_of(env)["history"]         # nothing counted toward the stuck rule
+
+
+def test_B_check_ready_respects_the_deadline(env, monkeypatch):
+    m = load_module()
+    with pytest.raises(m.Exit) as e:
+        m.left(time.time() + 1, 60)
+    assert e.value.code == 2 and "reused" in e.value.msg
+    assert 5 <= m.left(time.time() + 40, 60) <= 40
+
+
+def test_D_cpu_counts_only_the_process_holding_this_vms_disk(monkeypatch):
+    m = load_module()
+    monkeypatch.delenv("BB_DESKTOP_CPU", raising=False)
+    seen = []
+
+    class P:
+        def __init__(self, out): self.stdout = out
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+        if cmd[0].endswith("lsof"):
+            assert cmd[-1].endswith("/machines/default/disk.img")
+            return P("4435\n")
+        if cmd[:3] == ["/bin/ps", "-axo", "pid=,command="]:
+            return P("4361 /x/terminal-mac __run default\n4435 /System/.../com.apple.Virtualization.VirtualMachine\n"
+                     "5000 /System/.../com.apple.Virtualization.VirtualMachine\n")
+        assert cmd[-1] == "4435"            # the other VM's process is not sampled
+        return P("30.0\n")
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    monkeypatch.setattr(m.time, "sleep", lambda s: None)
+    assert m.vm_cpu("default") == 30.0
+
+
+def test_F_done_set_dead_runner_and_unrecordable_result(env, monkeypatch, tmp_path):
+    m = load_module()
+    monkeypatch.setattr(m, "STATE", env["BB_DESKTOP_STATE"])
+    monkeypatch.setattr(m, "LOG", env["BB_DESKTOP_LOG"])
+    dead = subprocess.Popen(["true"]); dead.wait()
+    with m.State() as st:
+        st.data["_requests"] = {"r1": {"t": time.time(), "state": "running", "pid": dead.pid}}
+        st.save()
+    rc, reply = m.request_claim("r1", 5)
+    assert rc == 1 and "died" in reply["error"]
+    assert m.request_claim("r2", 5) is None
+    assert json.load(open(env["BB_DESKTOP_STATE"]))["_requests"]["r2"]["pid"] == os.getpid()
+    # recording keeps failing: a warning in the log, never a failed action
+    calls_ = []
+
+    class Broken:
+        def __enter__(self):
+            calls_.append(1)
+            raise m.Exit(1, "locked")
+
+        def __exit__(self, *a):
+            pass
+    monkeypatch.setattr(m, "State", Broken)
+    monkeypatch.setattr(m.time, "sleep", lambda s: None)
+    assert m.request_done("r2", 0, {"ok": 1}) is False and len(calls_) == 5
+    assert "WARNING request r2 finished" in open(env["BB_DESKTOP_LOG"]).read()
+
+
+def test_G1_reap_leaves_a_vm_whose_mailbox_was_used_outside_a_lease(env):
+    run(env, "lease", "a", "--ttl", "1")
+    ex = os.path.join(env["TERMINAL_MAC_HOME"], "machines", "default", "exchange")
+    os.makedirs(ex)
+    open(os.path.join(ex, "request-x.json"), "w").close()      # a raw terminal-mac action just now
+    time.sleep(1.2)
+    rc, r, _ = run(env, "reap")
+    assert r["reap"]["default"].startswith("mailbox active") and vm_state(env) == "running"
+    old = time.time() - 3600
+    for f in [ex] + [os.path.join(ex, n) for n in os.listdir(ex)]:
+        os.utime(f, (old, old))
+    time.sleep(1.2)
+    rc, r, _ = run(dict(env, BB_DESKTOP_IDLE="1"), "reap")
+    assert r["reap"]["default"] is True and vm_state(env) == "paused"
+
+
+def mcp_session(env, *msgs, idle=None):
+    e = dict(env, **({"BB_DESKTOP_MCP_IDLE": str(idle)} if idle else {}))
+    p = subprocess.Popen([sys.executable, BIN, "mcp"], env=e, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    return p
+
+
+def mcp_call(p, mid, method, params=None):
+    p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": mid, "method": method, "params": params or {}}) + "\n")
+    p.stdin.flush()
+    return json.loads(p.stdout.readline())
+
+
+def test_G2_mcp_serves_terminal_macs_tools_behind_a_lease(env):
+    p = mcp_session(env)
+    try:
+        init = mcp_call(p, 1, "initialize", {"protocolVersion": "2025-06-18"})
+        assert init["result"]["serverInfo"]["name"] == "terminal-mac"
+        names = [t["name"] for t in mcp_call(p, 2, "tools/list")["result"]["tools"]]
+        assert names == ["screenshot", "click", "move", "drag", "scroll", "type", "key", "status"]
+        r = mcp_call(p, 3, "tools/call", {"name": "status", "arguments": {}})
+        assert "lease: free" in r["result"]["content"][0]["text"]       # status takes no lease
+        clear_calls(env)
+        r = mcp_call(p, 4, "tools/call", {"name": "type", "arguments": {"text": "Hi"}})
+        assert r["result"]["content"][0]["text"] == "Done: type."
+        lease = state_of(env)["lease"]
+        assert lease["owner"].startswith("mcp-")
+        assert [c[3] for c in calls(env) if c[2:3] == ["key"]] == ["shift+h", "i"]     # per key
+        mcp_call(p, 5, "tools/call", {"name": "click", "arguments": {"x": 5, "y": 6, "clicks": 2}})
+        assert calls(env)[-2:] == [["action", "default", "click", "5", "6"],
+                                   ["action", "default", "click", "5", "6", "--count", "2"]]
+        r = mcp_call(p, 6, "tools/call", {"name": "screenshot", "arguments": {}})
+        assert r["result"]["content"][0]["type"] == "image" and r["result"]["content"][0]["data"]
+        assert state_of(env)["lease"]["expires"] >= lease["expires"]       # renewed by each call
+        # another agent is refused while the MCP session holds it
+        assert run(env, "lease", "other")[0] == 4
+    finally:
+        p.stdin.close()
+        p.wait(20)
+    assert state_of(env)["lease"] is None                   # released on exit
+    assert vm_state(env) == "paused"
+
+
+def test_G2_mcp_releases_after_idle_and_reports_a_busy_desktop(env):
+    run(env, "lease", "someone", "--purpose", "app test")
+    p = mcp_session(env, idle=1)
+    try:
+        r = mcp_call(p, 1, "tools/call", {"name": "key", "arguments": {"key": "a"}})
+        assert r["result"]["isError"] and "someone" in r["result"]["content"][0]["text"]
+        run(env, "release", "someone")
+        r = mcp_call(p, 2, "tools/call", {"name": "key", "arguments": {"key": "a"}})
+        assert not r["result"].get("isError") and state_of(env)["lease"]["owner"].startswith("mcp-")
+        deadline = time.time() + 10
+        while state_of(env)["lease"] is not None and time.time() < deadline:
+            time.sleep(0.2)
+        assert state_of(env)["lease"] is None               # idle release
+    finally:
+        p.stdin.close()
+        p.wait(20)

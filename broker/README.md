@@ -316,6 +316,12 @@ bb-desktop peek                                              # read only: holder
 bb-desktop release my-agent                                  # and pauses the VM
 ```
 
+For agents that speak MCP, `bb-desktop mcp` serves terminal-mac's own tools (`screenshot`, `click`,
+`move`, `drag`, `scroll`, `type`, `key`, `status`, same names and arguments) behind a lease taken as
+`mcp-<pid>` on the first call and released on exit or after 10 idle minutes:
+`claude mcp add --scope user terminal-mac -- /path/to/broker/bb-desktop mcp`. The reaper also leaves
+alone a VM whose control mailbox was used in the last 10 minutes, or whose CPU is busy.
+
 ```python
 from broker_client import desktop_lease
 with desktop_lease("my-agent", purpose="clean install test") as d:

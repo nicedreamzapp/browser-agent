@@ -513,7 +513,7 @@ def _desktop_timeout(args):
     """How long to wait for bb-desktop: its own budget on the VM host (see budget() there)
     plus room for ssh or the relay and a screenshot copy."""
     cmd = args[0] if args else ""
-    host = {"lease": 400, "release": 240, "reap": 600}.get(cmd, 120)
+    host = {"lease": 900, "release": 240, "reap": 600}.get(cmd, 120)
     if cmd == "act" and "type" in args:
         host = 60 + 2 * len(" ".join(args[args.index("type") + 1:]))
     return host + 90
