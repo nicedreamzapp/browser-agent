@@ -227,9 +227,18 @@ def when(t):
     return time.strftime("%H:%M:%S", time.localtime(t))
 
 
+def dead_mcp(lease):
+    """An `mcp-<pid>` lease from this host whose server process is gone (killed with -9)."""
+    m = re.match(r"mcp-(\d+)$", lease.get("owner", ""))
+    return bool(m) and lease.get("host") == os.uname().nodename and not pid_alive(m.group(1))
+
+
 def live(rec, vm, now):
     """The lease if it is still unexpired, else None (and logs the expiry once)."""
     lease = rec.get("lease")
+    if lease and lease["expires"] > now and dead_mcp(lease):
+        log("vm=%s lease of %s: its MCP server is gone; free" % (vm, lease["owner"]))
+        lease["expires"] = now
     if lease and lease["expires"] <= now:
         log("vm=%s lease of %s (%s) expired at %s; free" % (vm, lease["owner"],
                                                            lease.get("purpose") or "-", when(lease["expires"])))
@@ -809,7 +818,8 @@ class McpSession:
 
     def ensure_lease(self):
         if not self.leased:
-            r = cmd_lease(self.owner, ["--vm", self.vm, "--purpose", "terminal-mac MCP session"])
+            r = cmd_lease(self.owner, ["--vm", self.vm, "--purpose", "terminal-mac MCP session",
+                                       "--ttl", str(int(MCP_IDLE + 60))])
             self.screen = tuple(r.get("screen") or self.screen)
             self.leased = True
 
@@ -852,8 +862,20 @@ class McpSession:
         def need(k, kind=int):
             if k not in a:
                 raise Exit(1, "Missing '%s'" % k)
-            return int(a[k]) if kind is int else str(a[k])
+            if kind is str:
+                return str(a[k])
+            if isinstance(a[k], bool) or not isinstance(a[k], (int, float)):
+                raise Exit(1, "'%s' must be an integer" % k)
+            return int(a[k])
+        if not isinstance(a, dict):
+            raise Exit(1, "arguments must be an object")
         self.last = time.time()
+        try:
+            return self._call(tool, a, need)
+        finally:
+            self.last = time.time()     # the idle clock starts when the call ends, not when it began
+
+    def _call(self, tool, a, need):
         if tool == "status":
             st, _ = vm_status(self.vm)
             text = "VM '%s' is %s." % (self.vm, st)
@@ -865,24 +887,37 @@ class McpSession:
             return [{"type": "text", "text": text}]
         if tool not in ("screenshot", "click", "move", "drag", "scroll", "type", "key"):
             raise Exit(1, "Unknown tool: %s" % tool)
+        # Check every argument before taking the lease, so a bad call never wakes the VM.
+        steps = []
+        if tool == "click":
+            extra = ["--button", "right"] if a.get("button") == "right" else []
+            clicks = max(1, min(3, need("clicks") if "clicks" in a else 1))
+            x, y = need("x"), need("y")
+            if clicks == 1:
+                steps.append(("click", x, y, *extra))
+            else:
+                steps.append(("click", x, y, *(extra + ["--double"])))     # clicks 1 and 2 of the sequence
+                if clicks == 3:
+                    # the third click continues it; the guest helper reads count=3 as a triple click
+                    steps.append(("click", x, y, *(extra + ["--count", 3])))
+        elif tool == "move":
+            steps.append(("move", need("x"), need("y")))
+        elif tool == "drag":
+            steps.append(("drag", need("x"), need("y"), need("toX"), need("toY")))
+        elif tool == "scroll":
+            steps.append(("scroll", "--dy", need("dy"), "--x", need("x"), "--y", need("y"),
+                          *(["--dx", need("dx")] if a.get("dx") is not None else [])))
+        elif tool == "type":
+            text = need("text", str)
+            keys_for(text)              # refuses unmappable characters up front
+            steps.append(("type", "--text", text))
+        elif tool == "key":
+            steps.append(("key", need("key", str)))
         self.ensure_lease()
         if tool == "screenshot":
             return self.shot()
-        if tool == "click":
-            extra = ["--button", "right"] if a.get("button") == "right" else []
-            for n in range(1, max(1, min(3, int(a.get("clicks") or 1))) + 1):
-                self.act("click", need("x"), need("y"), *(extra + (["--count", n] if n > 1 else [])))
-        elif tool == "move":
-            self.act("move", need("x"), need("y"))
-        elif tool == "drag":
-            self.act("drag", need("x"), need("y"), need("toX"), need("toY"))
-        elif tool == "scroll":
-            self.act("scroll", "--dy", need("dy"), "--x", need("x"), "--y", need("y"),
-                     *(["--dx", int(a["dx"])] if a.get("dx") is not None else []))
-        elif tool == "type":
-            self.act("type", "--text", need("text", str))
-        elif tool == "key":
-            self.act("key", need("key", str))
+        for step in steps:
+            self.act(*step)
         content = [{"type": "text", "text": "Done: %s." % tool}]
         if a.get("screenshot") is True:
             time.sleep(0.4)
@@ -908,38 +943,60 @@ def cmd_mcp(args):
                     sess.release("idle %ds" % MCP_IDLE)
 
     threading.Thread(target=idle_watch, daemon=True).start()
+    import signal
+
+    def stop(signum, frame):
+        raise SystemExit(0)     # unwinds to the finally below, which releases the lease
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop)
     try:
         for line in sys.stdin:
             try:
-                msg = json.loads(line)
-            except ValueError:
-                send({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}})
-                continue
-            if "id" not in msg:
-                continue        # notifications get no reply
-            mid, params, method = msg["id"], msg.get("params") or {}, msg.get("method")
-            if method == "initialize":
-                send({"jsonrpc": "2.0", "id": mid, "result": {
-                    "protocolVersion": params.get("protocolVersion", "2025-06-18"), "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "terminal-mac", "version": "bb-desktop"}, "instructions": MCP_INSTRUCTIONS}})
-            elif method == "ping":
-                send({"jsonrpc": "2.0", "id": mid, "result": {}})
-            elif method == "tools/list":
-                send({"jsonrpc": "2.0", "id": mid, "result": {"tools": MCP_TOOLS}})
-            elif method == "tools/call":
-                with sess.lock:
-                    try:
-                        content = sess.call(params.get("name", ""), params.get("arguments") or {})
-                        send({"jsonrpc": "2.0", "id": mid, "result": {"content": content}})
-                    except Exit as e:
-                        send({"jsonrpc": "2.0", "id": mid, "result": {
-                            "content": [{"type": "text", "text": e.msg}], "isError": True}})
-            else:
-                send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "Method not found"}})
+                handle(line, sess, send)
+            except Exception as e:      # never let one bad message end the server
+                log("vm=%s MCP message failed: %s" % (vm, str(e)[:120]))
     finally:
         with sess.lock:
             sess.release("session ended")
     return None
+
+
+def handle(line, sess, send):
+    try:
+        msg = json.loads(line)
+    except ValueError:
+        send({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}})
+        return
+    if not isinstance(msg, dict):
+        send({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid request"}})
+        return
+    if "id" not in msg:
+        return          # notifications get no reply
+    mid, method = msg["id"], msg.get("method")
+    params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+    try:
+        if method == "initialize":
+            send({"jsonrpc": "2.0", "id": mid, "result": {
+                "protocolVersion": params.get("protocolVersion", "2025-06-18"), "capabilities": {"tools": {}},
+                "serverInfo": {"name": "terminal-mac", "version": "bb-desktop"}, "instructions": MCP_INSTRUCTIONS}})
+        elif method == "ping":
+            send({"jsonrpc": "2.0", "id": mid, "result": {}})
+        elif method == "tools/list":
+            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": MCP_TOOLS}})
+        elif method == "tools/call":
+            with sess.lock:
+                try:
+                    args = params.get("arguments")
+                    content = sess.call(str(params.get("name", "")), {} if args is None else args)
+                    send({"jsonrpc": "2.0", "id": mid, "result": {"content": content}})
+                except Exception as e:
+                    text = e.msg if isinstance(e, Exit) else "%s: %s" % (type(e).__name__, e)
+                    send({"jsonrpc": "2.0", "id": mid, "result": {
+                        "content": [{"type": "text", "text": text}], "isError": True}})
+        else:
+            send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "Method not found"}})
+    except Exception as e:
+        send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32603, "message": "Internal error: %s" % str(e)[:200]}})
 
 # ---- remote requests: run once, answer repeats from the done-set -------------------
 def request_claim(rid, wait):

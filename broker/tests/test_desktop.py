@@ -39,6 +39,20 @@ if a[0] == "ls":
     print(json.dumps([{"name": "default", "installed": True}])); sys.exit(0)
 if a[0] == "action":
     verb = a[2]
+    # The real CLI's option parser (CLI.swift `action`): anything else is "Unknown option".
+    flags, opts = {"double"}, {"x", "y", "x2", "y2", "dx", "dy", "text", "key", "button", "count", "output", "timeout"}
+    rest = a[3:]
+    while rest:
+        t = rest.pop(0)
+        if t == "--":
+            break
+        if t.startswith("--") and len(t) > 2:
+            if t[2:] in flags:
+                continue
+            if t[2:] in opts and rest:
+                rest.pop(0)
+                continue
+            print("terminal-mac: Unknown option: " + t, file=sys.stderr); sys.exit(1)
     if verb == "status":
         perm = os.environ.get("FAKE_TMAC_PERMS", "true")
         print(json.dumps({"accessibility": perm, "screenRecording": "true", "width": "1280", "height": "800"}))
@@ -707,8 +721,10 @@ def test_G2_mcp_serves_terminal_macs_tools_behind_a_lease(env):
         assert lease["owner"].startswith("mcp-")
         assert [c[3] for c in calls(env) if c[2:3] == ["key"]] == ["shift+h", "i"]     # per key
         mcp_call(p, 5, "tools/call", {"name": "click", "arguments": {"x": 5, "y": 6, "clicks": 2}})
-        assert calls(env)[-2:] == [["action", "default", "click", "5", "6"],
-                                   ["action", "default", "click", "5", "6", "--count", "2"]]
+        assert calls(env)[-1] == ["action", "default", "click", "5", "6", "--double"]
+        mcp_call(p, 51, "tools/call", {"name": "click", "arguments": {"x": 5, "y": 6, "clicks": 3, "button": "right"}})
+        assert calls(env)[-2:] == [["action", "default", "click", "5", "6", "--button", "right", "--double"],
+                                   ["action", "default", "click", "5", "6", "--button", "right", "--count", "3"]]
         r = mcp_call(p, 6, "tools/call", {"name": "screenshot", "arguments": {}})
         assert r["result"]["content"][0]["type"] == "image" and r["result"]["content"][0]["data"]
         assert state_of(env)["lease"]["expires"] >= lease["expires"]       # renewed by each call
@@ -734,6 +750,84 @@ def test_G2_mcp_releases_after_idle_and_reports_a_busy_desktop(env):
         while state_of(env)["lease"] is not None and time.time() < deadline:
             time.sleep(0.2)
         assert state_of(env)["lease"] is None               # idle release
+    finally:
+        p.stdin.close()
+        p.wait(20)
+
+
+
+# ---- round 3: the MCP server ------------------------------------------------------------
+def test_fake_terminal_mac_rejects_unknown_options_like_the_real_one(env):
+    run(env, "lease", "a")
+    rc, _, err = run(env, "act", "a", "click", "1", "2", "--triple")
+    assert rc == 1 and "Unknown option: --triple" in err
+
+
+def test_mcp_sigterm_releases_and_a_killed_server_leaves_a_free_lease(env):
+    import signal
+    p = mcp_session(env, idle=300)
+    mcp_call(p, 1, "tools/call", {"name": "key", "arguments": {"key": "a"}})
+    lease = state_of(env)["lease"]
+    assert lease["owner"] == "mcp-%d" % p.pid and lease["ttl"] == 360         # MCP_IDLE + 60
+    p.send_signal(signal.SIGTERM)
+    assert p.wait(20) == 0
+    assert state_of(env)["lease"] is None
+    # kill -9: nothing runs, but a lease held by a dead mcp-<pid> on this host is free
+    p = mcp_session(env, idle=300)
+    mcp_call(p, 1, "tools/call", {"name": "key", "arguments": {"key": "a"}})
+    p.kill()
+    p.wait(20)
+    assert state_of(env)["lease"]["owner"] == "mcp-%d" % p.pid
+    rc, r, _ = run(env, "lease", "next-agent")
+    assert rc == 0 and r["owner"] == "next-agent"
+    assert "its MCP server is gone" in open(env["BB_DESKTOP_LOG"]).read()
+
+
+def test_mcp_survives_garbage(env):
+    p = mcp_session(dict(env, BB_DESKTOP_SHOTS="/dev/null/nope"))
+    try:
+        def raw(line):
+            p.stdin.write(line + "\n")
+            p.stdin.flush()
+            return json.loads(p.stdout.readline())
+        assert raw("not json")["error"]["code"] == -32700
+        assert raw("[1, 2]")["error"]["code"] == -32600
+        assert raw('"text"')["error"]["code"] == -32600
+        assert "result" in raw('{"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": 7}')
+        bad = [{"name": "click", "arguments": {"x": "abc", "y": 1}},
+               {"name": "click", "arguments": [1, 2]},
+               {"name": "click", "arguments": {"x": True, "y": 1}},
+               {"name": "type", "arguments": "hello"},
+               {"name": 5},
+               {"name": "screenshot", "arguments": {}}]           # OSError: the shots dir cannot exist
+        for i, params in enumerate(bad):
+            r = mcp_call(p, 10 + i, "tools/call", params)
+            assert r["result"]["isError"], params
+        r = mcp_call(p, 99, "tools/call", {"name": "status", "arguments": {}})
+        assert not r["result"].get("isError") and "is running" in r["result"]["content"][0]["text"]
+        assert p.poll() is None
+    finally:
+        p.stdin.close()
+        p.wait(20)
+
+
+def test_mcp_idle_clock_starts_when_a_call_ends(env, monkeypatch):
+    m = load_module()
+    sess = m.McpSession()
+    monkeypatch.setattr(sess, "_call", lambda tool, a, need: time.sleep(0.5) or [])
+    t = time.time()
+    sess.call("key", {"key": "a"})
+    assert sess.last >= t + 0.5
+
+
+def test_mcp_bad_arguments_never_take_the_lease(env):
+    p = mcp_session(env)
+    try:
+        for i, params in enumerate([{"name": "click", "arguments": {"x": "abc", "y": 1}},
+                                    {"name": "type", "arguments": {"text": "caf\u00e9"}},
+                                    {"name": "drag", "arguments": {"x": 1, "y": 2}}]):
+            assert mcp_call(p, i, "tools/call", params)["result"]["isError"]
+        assert not os.path.exists(env["BB_DESKTOP_STATE"]) or state_of(env)["lease"] is None
     finally:
         p.stdin.close()
         p.wait(20)
