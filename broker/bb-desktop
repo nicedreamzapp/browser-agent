@@ -25,26 +25,58 @@ Matt (2026-11-04, 10:20 PM): every model and job that is done frees its memory. 
 release (and an expired lease) suspends the VM to disk (or pauses it, on a terminal-mac
 without `suspend`; a pause stops the CPU but keeps the RAM), lease wakes it, and `reap` (plain code,
 no model) pauses any running VM that has no lease and has sat idle 10+ minutes. A VM is
-never paused while a lease is live or while a `terminal-mac view` viewer is attached.
+never paused while a lease is live, while a `terminal-mac view` viewer is attached, or by
+reap while its CPU is busy (someone is working in it). A VM the broker did not wake gets
+its 10 minutes counted from the first time reap sees it running.
 
 Every command prints one JSON line on stdout. A lease expires TTL seconds after
 the last act/renew and is then free to take. The lease state lives on the machine
 that owns the VM: on a machine without terminal-mac (the M5, the PC) the same
-command runs on the mini, LAN ssh first, then the VPS relay.
+command runs on the VM host, LAN ssh first, then a relay. Each remote request carries
+an id and the host remembers finished ones, so a repeat returns the first result
+instead of typing or clicking twice. Once the LAN run has started it is never re-sent
+over the relay. Where the host lives is not in this repo: set it in
+~/.config/browser-agent/desktop.env (chmod 600) or the environment:
+
+    BB_DESKTOP_MINI=user@vm-host.lan                  LAN ssh target of the VM host
+    BB_DESKTOP_RELAY=user@relay.example.com           ssh target that can reach it from anywhere
+    BB_DESKTOP_RELAY_RUN="/path/run-on.sh vm-host"    command there: <RELAY_RUN> '<shell cmd>' <timeout>
 
 Exit 0 ok · 1 error (terminal-mac failed, mini unreachable, bad usage) · 2 the VM or
 its guest helper is not ready · 3 you do not hold the lease · 4 another owner holds
 it (the reply says who and why) · 5 stuck: this owner leased and released it twice
 in the last 10 minutes; stop and ask the human in one line.
 """
-import base64, json, os, re, shlex, shutil, subprocess, sys, time
+import base64, json, os, re, shlex, shutil, subprocess, sys, time, uuid
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+CONFIG = os.environ.get("BB_DESKTOP_CONFIG", os.path.expanduser("~/.config/browser-agent/desktop.env"))
+
+
+def _load_config(path):
+    """KEY=VALUE lines from the untracked config; the environment wins over the file."""
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+                    v = v[1:-1]
+                os.environ.setdefault(k, v)
+    except OSError:
+        pass
+
+
+_load_config(CONFIG)
 STATE = os.environ.get("BB_DESKTOP_STATE", os.path.join(HERE, "desktop-lease.json"))
 LOG = os.environ.get("BB_DESKTOP_LOG", os.path.join(HERE, "desktop.log"))
 SHOTS = os.environ.get("BB_DESKTOP_SHOTS", "/tmp/bb-desktop")
-MINI = os.environ.get("BB_DESKTOP_MINI", "matthewmacosko@192.168.1.84")
-RELAY = os.environ.get("BB_DESKTOP_RELAY", "root@5.252.55.128")
+MINI = os.environ.get("BB_DESKTOP_MINI", "")
+RELAY = os.environ.get("BB_DESKTOP_RELAY", "")
+RELAY_RUN = os.environ.get("BB_DESKTOP_RELAY_RUN", "")
 REMOTE_BIN = os.environ.get("BB_DESKTOP_REMOTE_BIN", "$HOME/Scripts/browser-agent/broker/bb-desktop")
 # terminal-mac 0.2.0 build 6: `action type` returns {} and types nothing in a macOS 27
 # guest, while `key <char>` works. Set BB_DESKTOP_NATIVE_TYPE=1 once upstream fixes it.
@@ -52,12 +84,31 @@ NATIVE_TYPE = os.environ.get("BB_DESKTOP_NATIVE_TYPE") == "1"
 TTL = 1800
 STUCK_WINDOW, STUCK_AFTER = 600, 2
 IDLE_PAUSE = int(os.environ.get("BB_DESKTOP_IDLE", "600"))
+CPU_BUSY = float(os.environ.get("BB_DESKTOP_CPU_BUSY", "10"))   # % across two samples
+LOCK_WAIT = float(os.environ.get("BB_DESKTOP_LOCK_WAIT", "20"))
+SUSPENDING_STALE = 600     # a "suspending" mark older than this is from a killed run
+REQUEST_KEEP = 3600        # how long the host remembers a finished remote request
 
 
 class Exit(Exception):
     def __init__(self, code, msg, **extra):
         super().__init__(msg)
         self.code, self.msg, self.extra = code, msg, extra
+
+
+def budget(argv):
+    """Seconds a command may take on the VM host. Callers (remote(), broker_client) add
+    their own transport slack on top. Lease covers restore 180 + boot 120 + helper 60."""
+    cmd = argv[0] if argv else ""
+    if cmd == "lease":
+        return 400
+    if cmd == "release":
+        return 240          # status 30 + suspend 180 + slack
+    if cmd == "reap":
+        return 600
+    if cmd == "act" and "type" in argv:
+        return 60 + 2 * len(" ".join(argv[argv.index("type") + 1:]))
+    return 120
 
 
 # ---- the per-key typing path ------------------------------------------------
@@ -93,7 +144,7 @@ def keys_for(text):
 
 # ---- where terminal-mac lives -------------------------------------------------
 def local_tmac():
-    """Path to terminal-mac on this machine, or None (then the mini runs the command)."""
+    """Path to terminal-mac on this machine, or None (then the VM host runs the command)."""
     forced = os.environ.get("BB_DESKTOP_TMAC")
     if forced is not None:
         return forced or None
@@ -116,14 +167,30 @@ def tmac(*args, timeout=60):
     return reply
 
 
-# ---- lease state (one JSON file, flock'd) -------------------------------------
+def vm_status(vm):
+    """(state, pid) from terminal-mac status."""
+    r = tmac("status", vm, timeout=30)
+    return r.get("state"), r.get("pid")
+
+
+# ---- lease state (one JSON file, flock'd, never held across a slow call) -------
 class State:
     def __enter__(self):
         import fcntl    # here, not at the top: Windows has no fcntl and only ever runs the remote path
         self.fcntl = fcntl
         os.makedirs(os.path.dirname(STATE) or ".", exist_ok=True)
         self.lock = open(STATE + ".lock", "a")
-        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        deadline = time.time() + LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time() > deadline:
+                    self.lock.close()
+                    raise Exit(1, "the desktop lease state stayed locked for %ds (another bb-desktop is"
+                               " stuck holding it); try again" % LOCK_WAIT)
+                time.sleep(0.1)
         try:
             with open(STATE) as f:
                 self.data = json.load(f)
@@ -169,6 +236,15 @@ def live(rec, vm, now):
     return rec.get("lease")
 
 
+def suspending(rec, now):
+    """True while a release/reap is suspending or pausing this VM right now."""
+    s = rec.get("suspending")
+    if s and now - s.get("since", 0) > SUSPENDING_STALE:
+        rec.pop("suspending", None)     # left behind by a run that was killed
+        return False
+    return bool(s)
+
+
 def holder_or_exit(st, vm, owner, now):
     rec = st.vm(vm)
     lease = live(rec, vm, now)
@@ -178,6 +254,8 @@ def holder_or_exit(st, vm, owner, now):
     if lease["owner"] != owner:
         raise Exit(3, "the desktop %s is leased by %s (%s), not %s" % (vm, lease["owner"], lease.get("purpose") or "-", owner),
                    held_by=lease["owner"], purpose=lease.get("purpose"))
+    if suspending(rec, now):
+        raise Exit(2, "the desktop %s is being suspended right now; lease it again once that finishes" % vm)
     return rec, lease
 
 
@@ -215,42 +293,60 @@ def supports_suspend():
     return ok
 
 
-def was_suspended(vm, flag=None):
-    """Whether we suspended `vm` (a suspended VM reads as stopped). With flag, record it."""
+def mark(vm, **fields):
+    """Set (or, with None, drop) per-VM flags under the lock. Returns the record's old values."""
     with State() as st:
         rec = st.vm(vm)
-        if flag is None:
-            return bool(rec.get("suspended"))
-        rec["suspended"] = flag
+        old = {k: rec.get(k) for k in fields}
+        for k, v in fields.items():
+            if v is None:
+                rec.pop(k, None)
+            else:
+                rec[k] = v
         st.save()
+    return old
+
+
+def flag(vm, name):
+    with State() as st:
+        return st.vm(vm).get(name)
 
 
 def wait_state(vm, want, seconds):
     end = time.time() + seconds
     while True:
-        st = tmac("status", vm, timeout=30).get("state")
+        st, _ = vm_status(vm)
         if st == want or time.time() > end:
             return st
         time.sleep(2)
 
 
+# A restore that fails for this reason may fall back to a plain start; any other failure is the human's call.
+NO_SAVED_STATE = re.compile(r"no (saved|suspended)[ -]?(machine )?state|nothing to restore|not suspended|"
+                            r"no such (file|saved)", re.I)
+
+
 def check_ready(vm):
     """Wake a paused or suspended VM; refuse unless the guest helper has both permissions."""
-    st = tmac("status", vm, timeout=30).get("state")
+    st, _ = vm_status(vm)
     woke = False
     if st == "paused":
         tmac("resume", vm, timeout=60)
         log("vm=%s was paused; resumed" % vm)
         st, woke = "running", True
-    elif st == "suspended" or (st == "stopped" and was_suspended(vm)):
+    elif st == "suspended" or (st == "stopped" and flag(vm, "suspended")):
         try:
             tmac("restore", vm, timeout=180)
-        except Exit:
-            tmac("start", vm, timeout=180)    # the fork's start restores a saved state too
+        except Exit as e:
+            if not NO_SAVED_STATE.search(e.msg):
+                raise Exit(2, "could not restore the suspended VM %s (%s); ask the human" % (vm, e.msg), vm_state=st)
+            log("vm=%s had no saved state to restore; starting it" % vm)
+            tmac("start", vm, timeout=180)
         st = wait_state(vm, "running", 120)
         log("vm=%s was suspended; restored (%s)" % (vm, st))
-        was_suspended(vm, False)
         woke = True
+    if st == "running":
+        mark(vm, suspended=None, **({"ours": True} if woke else {}))
     if st != "running":
         raise Exit(2, "the VM %s is %s, not running; ask the human before starting it (terminal-mac start %s)"
                    % (vm, st, vm), vm_state=st)
@@ -294,33 +390,41 @@ def cmd_lease(owner, args):
     vm = opt(args, "--vm", "default")
     purpose = opt(args, "--purpose")
     ttl = int(opt(args, "--ttl", TTL))
-    now = time.time()
-    with State() as st:
-        rec = st.vm(vm)
-        lease = live(rec, vm, now)
-        if lease and lease["owner"] != owner:
+    wait_until = time.time() + 300      # a suspend in progress: wait for it, then wake the VM
+    while True:
+        now = time.time()
+        with State() as st:
+            rec = st.vm(vm)
+            lease = live(rec, vm, now)
+            if lease and lease["owner"] != owner:
+                st.save()
+                raise Exit(4, "the desktop %s is leased by %s for \"%s\" until %s; wait or ask"
+                           % (vm, lease["owner"], lease.get("purpose") or "-", when(lease["expires"])),
+                           held_by=lease["owner"], purpose=lease.get("purpose"), expires=lease["expires"])
+            if lease:   # already ours: renew, not a new lease
+                lease.update(expires=now + ttl, ttl=ttl, purpose=purpose or lease.get("purpose"))
+                st.save()
+                return {"leased": True, "already_yours": True, "vm": vm, "owner": owner, "expires": lease["expires"]}
+            rec["history"] = [h for h in rec["history"] if h["released"] > now - STUCK_WINDOW]
+            recent = [h for h in rec["history"] if h["owner"] == owner]
+            if len(recent) >= STUCK_AFTER:
+                st.save()
+                log("vm=%s owner=%s refused: stuck (%d leases in 10 min)" % (vm, owner, len(recent)))
+                raise Exit(5, "stuck: %s leased and released the desktop %s %d times in the last 10 minutes."
+                           " Stop and ask the human in one line what is wrong." % (owner, vm, len(recent)))
+            if not suspending(rec, now):
+                # Hold it before checking the VM, so the reaper cannot pause it in between.
+                rec["last_used"] = now
+                rec["lease"] = {"owner": owner, "purpose": purpose, "start": now, "expires": now + ttl, "ttl": ttl,
+                                "host": os.uname().nodename}
+                st.save()
+                break
             st.save()
-            raise Exit(4, "the desktop %s is leased by %s for \"%s\" until %s; wait or ask"
-                       % (vm, lease["owner"], lease.get("purpose") or "-", when(lease["expires"])),
-                       held_by=lease["owner"], purpose=lease.get("purpose"), expires=lease["expires"])
-        if lease:   # already ours: renew, not a new lease
-            lease.update(expires=now + ttl, ttl=ttl, purpose=purpose or lease.get("purpose"))
-            st.save()
-            return {"leased": True, "already_yours": True, "vm": vm, "owner": owner, "expires": lease["expires"]}
-        rec["history"] = [h for h in rec["history"] if h["released"] > now - STUCK_WINDOW]
-        recent = [h for h in rec["history"] if h["owner"] == owner]
-        if len(recent) >= STUCK_AFTER:
-            st.save()
-            log("vm=%s owner=%s refused: stuck (%d leases in 10 min)" % (vm, owner, len(recent)))
-            raise Exit(5, "stuck: %s leased and released the desktop %s %d times in the last 10 minutes."
-                       " Stop and ask the human in one line what is wrong." % (owner, vm, len(recent)))
-        # Hold it before checking the VM, so the reaper cannot pause it in between.
-        rec["last_used"] = now
-        rec["lease"] = {"owner": owner, "purpose": purpose, "start": now, "expires": now + ttl, "ttl": ttl,
-                        "host": os.uname().nodename}
-        st.save()
+        if time.time() > wait_until:
+            raise Exit(2, "the desktop %s has been suspending for 5 minutes; ask the human" % vm)
+        time.sleep(2)
     try:
-        status = check_ready(vm)    # outside the lock: it can take a few seconds
+        status = check_ready(vm)    # outside the lock: it can take minutes
     except Exit:
         with State() as st:
             rec = st.vm(vm)
@@ -380,57 +484,127 @@ def viewers(vm):
     return False
 
 
+def vm_cpu(pid):
+    """CPU % of the VM, averaged over two samples 3 s apart: its terminal-mac process plus the
+    Virtualization XPC service that runs the guest (one VM per host, as on the mini)."""
+    forced = os.environ.get("BB_DESKTOP_CPU")
+    if forced is not None:
+        return float(forced)
+    total = 0.0
+    for i in range(2):
+        if i:
+            time.sleep(3)
+        out = subprocess.run(["/bin/ps", "-axo", "pid=,%cpu=,command="], capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            bits = line.split(None, 2)
+            if len(bits) == 3 and (bits[0] == str(pid) or "Virtualization.VirtualMachine" in bits[2]):
+                try:
+                    total += float(bits[1])
+                except ValueError:
+                    pass
+    return total / 2
+
+
 def pause_if_free(vm, why):
     """Suspend `vm` (state to disk, RAM freed) when terminal-mac can, else pause it, unless a
-    lease is live on it or a viewer is attached. Returns True when it did, else the reason."""
-    with State() as st:     # held through the pause, so no lease can start in between
-        lease = live(st.vm(vm), vm, time.time())
-        st.save()
+    lease is live on it or a viewer is attached. Returns True when it did, else the reason.
+    The lock is held only to check and mark: the slow suspend runs outside it."""
+    how = "suspend" if supports_suspend() else "pause"
+    with State() as st:
+        rec = st.vm(vm)
+        lease = live(rec, vm, time.time())
         if lease:
+            st.save()
             return "leased by %s" % lease["owner"]
+        if suspending(rec, time.time()):
+            st.save()
+            return "already being suspended"
         if viewers(vm):
+            st.save()
             log("vm=%s not paused (%s): a terminal-mac viewer is attached" % (vm, why))
             return "viewer attached"
-        try:
-            state = tmac("status", vm, timeout=30).get("state")
-            if state != "running":
-                return "already %s" % state
-            how = "suspend" if supports_suspend() else "pause"
-            tmac(how, vm, timeout=180 if how == "suspend" else 60)
-        except Exit as e:
-            log("vm=%s pause FAILED (%s): %s" % (vm, why, e.msg[:120]))
-            return "pause failed: %s" % e.msg[:120]
+        was = rec.get("suspended")
+        rec["suspending"] = {"since": time.time(), "how": how}
         if how == "suspend":
-            st.vm(vm)["suspended"] = True
-            st.save()
-    log("vm=%s %s (%s)" % (vm, "suspended" if how == "suspend" else "paused", why))
-    return True
+            rec["suspended"] = True     # before the call, so a killed release still leaves it right
+        st.save()
+    result, err, state = True, None, None
+    try:
+        state, _ = vm_status(vm)
+        if state != "running":
+            result = "already %s" % state
+        else:
+            tmac(how, vm, timeout=180 if how == "suspend" else 60)
+    except Exit as e:
+        err = e.msg
+        result = "pause failed: %s" % e.msg[:120]
+    with State() as st:
+        rec = st.vm(vm)
+        rec.pop("suspending", None)
+        if result is True:
+            rec.pop("ours", None)
+            rec["seen_running"] = False
+        else:
+            if was is None:
+                rec.pop("suspended", None)
+            else:
+                rec["suspended"] = was
+            if state == "running":
+                rec.pop("suspended", None)
+        st.save()
+    if err:
+        log("vm=%s %s FAILED (%s): %s" % (vm, how, why, err[:120]))
+    elif result is True:
+        log("vm=%s %s (%s)" % (vm, "suspended" if how == "suspend" else "paused", why))
+    return result
 
 
 def cmd_reap(args):
-    """Pause every running VM whose lease expired, or that has had no lease for IDLE_PAUSE s."""
-    now = time.time()
+    """Pause every running VM whose lease expired, or that has had no lease for IDLE_PAUSE s.
+    A VM the broker did not wake starts its idle clock the first time reap sees it running,
+    and a VM whose CPU is busy is left alone (someone is working in it)."""
     try:
         names = [m["name"] for m in tmac("ls", timeout=30) if isinstance(m, dict) and m.get("name")]
     except (Exit, TypeError):
         names = []
     out = {}
     for vm in names or ["default"]:
+        try:
+            state, pid = vm_status(vm)
+        except Exit as e:
+            out[vm] = "status failed: %s" % e.msg[:80]
+            continue
+        now = time.time()
+        first_sight = False
         with State() as st:
             rec = st.vm(vm)
             had = rec.get("lease")
             lease = live(rec, vm, now)
             just_expired = had is not None and lease is None
-            if not lease and "last_used" not in rec:
-                rec["last_used"] = now      # first sight of an unused VM: give it the full idle window
+            if state != "running":
+                rec["seen_running"] = False
+            else:
+                rec.pop("suspended", None)
+                if not lease and not rec.get("seen_running"):
+                    rec["seen_running"] = True
+                    if not rec.get("ours") or "last_used" not in rec:
+                        rec["last_used"] = now      # not woken by us: the 10 minutes start now
+                        first_sight = not just_expired
             idle = now - rec.get("last_used", now)
             st.save()
         if lease:
             out[vm] = "leased by %s" % lease["owner"]
-        elif just_expired:
-            out[vm] = pause_if_free(vm, "lease expired")
-        elif idle >= IDLE_PAUSE:
-            out[vm] = pause_if_free(vm, "idle %d min" % (idle // 60))
+        elif state != "running":
+            out[vm] = "already %s" % state
+        elif first_sight:
+            out[vm] = "first seen running; idle clock started"
+        elif just_expired or idle >= IDLE_PAUSE:
+            cpu = vm_cpu(pid)
+            if cpu > CPU_BUSY:
+                log("vm=%s not paused: busy (cpu %.0f%%), someone is working in it" % (vm, cpu))
+                out[vm] = "busy (cpu %.0f%%)" % cpu
+            else:
+                out[vm] = pause_if_free(vm, "lease expired" if just_expired else "idle %d min" % (idle // 60))
         else:
             out[vm] = "idle %ds of %ds" % (idle, IDLE_PAUSE)
     return {"reap": out}
@@ -452,9 +626,8 @@ def cmd_act(owner, args):
     out = {"vm": vm, "owner": owner, "act": verb}
     try:
         if verb == "type":
-            text = rest[-1] if rest else ""
-            if rest[:1] == ["--text"] and len(rest) == 2:
-                text = rest[1]
+            words = rest[1:] if rest[:1] == ["--text"] else rest
+            text = " ".join(words)      # unquoted words are typed with spaces, never dropped
             what = "type len=%d%s" % (len(text), " native" if native else "")
             if native:
                 tmac("action", vm, "type", "--", text)
@@ -474,7 +647,7 @@ def cmd_act(owner, args):
             what = " ".join([verb] + rest)[:80]
         log("vm=%s owner=%s %s ok" % (vm, owner, what))
     except Exit as e:
-        log("vm=%s owner=%s %s FAILED: %s" % (vm, owner, verb if verb != "type" else "type", e.msg[:120]))
+        log("vm=%s owner=%s %s FAILED: %s" % (vm, owner, verb, e.msg[:120]))
         raise
     return out
 
@@ -495,7 +668,9 @@ def cmd_peek(args):
         if last:
             out["last"] = "%s, %s at %s" % (last["owner"], "expired" if last.get("expired") else "released",
                                              when(last["released"]))
-    out["vm_state"] = tmac("status", vm, timeout=30).get("state")
+    if rec.get("suspending"):
+        out["suspending"] = True
+    out["vm_state"], _ = vm_status(vm)
     if out["vm_state"] == "running":
         try:
             path = shot_path(vm, "peek")
@@ -506,30 +681,61 @@ def cmd_peek(args):
     return out
 
 
-# ---- running it on the mini -------------------------------------------------------
+# ---- remote requests: run once, answer repeats from the done-set -------------------
+def request_claim(rid, wait):
+    """None when this request id is new (now marked running); else (rc, reply) of the first
+    run, waiting up to `wait` s for it if it is still running."""
+    end = time.time() + wait
+    while True:
+        with State() as st:
+            reqs = st.data.setdefault("_requests", {})
+            now = time.time()
+            for k in [k for k, v in reqs.items() if now - v.get("t", 0) > REQUEST_KEEP]:
+                del reqs[k]
+            r = reqs.get(rid)
+            if r is None:
+                reqs[rid] = {"t": now, "state": "running"}
+                st.save()
+                return None
+            st.save()
+            if r["state"] == "done":
+                return r["rc"], dict(r["reply"], repeat=True)
+        if time.time() > end:
+            return 1, {"error": "request %s is still running on the VM host" % rid, "repeat": True}
+        time.sleep(1)
+
+
+def request_done(rid, rc, reply):
+    with State() as st:
+        st.data.setdefault("_requests", {})[rid] = {"t": time.time(), "state": "done", "rc": rc, "reply": reply}
+        st.save()
+
+
+# ---- running it on the VM host ------------------------------------------------------
 def remote(argv):
-    """Run this same command on the mini. Screenshots come back to the same path here."""
+    """Run this same command on the VM host. Screenshots come back to the same path here."""
     argv = list(argv)
     want_local = None
     if argv[:1] == ["act"] and "screenshot" in argv:
         i = argv.index("screenshot")
         if i + 1 < len(argv):
             want_local = argv.pop(i + 1)
-    script = ("export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH; %s %s; echo __BBD_RC=$?"
-              % (REMOTE_BIN, " ".join(shlex.quote(a) for a in argv)))
-    timeout = 120 + (len(argv[-1]) if "type" in argv else 0)
-    out, how = run_on_mini(script, timeout)
+    rid = uuid.uuid4().hex
+    script = ("echo __BBD_START; export PATH=$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH;"
+              " BB_DESKTOP_REQUEST_ID=%s %s %s; echo __BBD_RC=$?"
+              % (rid, REMOTE_BIN, " ".join(shlex.quote(a) for a in argv)))
+    out, how = run_on_mini(script, budget(argv) + 30)
     lines = out.rstrip("\n").split("\n")
     rc_line = next((l for l in reversed(lines) if l.startswith("__BBD_RC=")), None)
     if rc_line is None:
-        raise Exit(1, "the mini gave no answer (%s): %s" % (how, out.strip()[-300:]))
+        raise Exit(1, "the VM host gave no answer (%s): %s" % (how, out.strip()[-300:]))
     rc = int(rc_line.split("=", 1)[1])
-    body = [l for l in lines if l.strip() and not l.startswith("__BBD_RC=")]
+    body = [l for l in lines if l.strip() and not l.startswith("__BBD_")]
     reply = next((json.loads(l) for l in reversed(body) if l.startswith("{")), {})
     for l in body:
         if not l.startswith("{"):
             print(l, file=sys.stderr)
-    reply["ran_on"] = "mini via " + how
+    reply["ran_on"] = "VM host via " + how
     if reply.get("screenshot"):
         local = want_local or reply["screenshot"]
         fetch(reply["screenshot"], local)
@@ -537,60 +743,101 @@ def remote(argv):
     return rc, reply
 
 
-def run_on_mini(script, timeout):
-    """(output, how). LAN ssh first; the VPS relay when the LAN is down. The command is
+def _text(x):
+    return x.decode(errors="replace") if isinstance(x, bytes) else (x or "")
+
+
+def run_on_mini(script, timeout, retry_after_start=False):
+    """(stdout, how). LAN ssh first; the relay only when the LAN connection itself failed.
+    Once the LAN run has printed __BBD_START it is never re-sent (unless the caller says
+    the script is safe to repeat): a lost answer is an error, not a retry. The script is
     base64'd so no layer of quoting can mangle it."""
     b64 = base64.b64encode(script.encode()).decode()
     inner = "echo %s | base64 -d | /bin/zsh -l" % b64
+    if MINI:
+        try:
+            p = subprocess.run(["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", MINI, inner],
+                               capture_output=True, text=True, timeout=timeout)
+            out, started, rc = p.stdout, "__BBD_START" in p.stdout, p.returncode
+        except subprocess.TimeoutExpired as e:
+            out, rc = _text(e.stdout), None
+            started = "__BBD_START" in out
+        if "__BBD_RC=" in out:
+            return out, "lan"
+        if started and not retry_after_start:
+            raise Exit(1, "the command started on the VM host over the LAN but its answer was lost; it was"
+                       " not re-sent. Check with bb-desktop peek before trying again.")
+        if not started and rc not in (255, None):
+            raise Exit(1, "the VM host's shell failed over the LAN (exit %s): %s" % (rc, (out or p.stderr).strip()[-300:]))
+    if not (RELAY and RELAY_RUN):
+        raise Exit(1, "the VM host is not reachable over the LAN and no relay is configured"
+                   " (BB_DESKTOP_MINI / BB_DESKTOP_RELAY / BB_DESKTOP_RELAY_RUN in %s)" % CONFIG)
     try:
-        p = subprocess.run(["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", MINI, inner],
-                           capture_output=True, text=True, timeout=timeout)
-        if p.returncode != 255 and "__BBD_RC=" in p.stdout:
-            return p.stdout + p.stderr, "lan"
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        p = subprocess.run(["ssh", "-o", "ConnectTimeout=10", RELAY,
-                            "/root/fia-run-on.sh mini '%s' %d" % (inner, timeout)],
+        p = subprocess.run(["ssh", "-o", "ConnectTimeout=10", RELAY, "%s '%s' %d" % (RELAY_RUN, inner, timeout)],
                            capture_output=True, text=True, timeout=timeout + 30)
     except subprocess.TimeoutExpired:
-        raise Exit(1, "the mini did not answer over the LAN or the relay within %ss" % timeout)
-    return p.stdout + p.stderr, "relay"
+        raise Exit(1, "the VM host did not answer over the relay within %ss" % timeout)
+    return p.stdout, "relay"
 
 
 def fetch(remote_path, local_path):
-    out, _ = run_on_mini("base64 -i %s; echo; echo __BBD_RC=$?" % shlex.quote(remote_path), 120)
-    data = "".join(l for l in out.split("\n") if l and not l.startswith("__BBD_RC="))
+    """Copy a screenshot back from the VM host. Fails loudly on a bad copy."""
+    out, _ = run_on_mini("echo __BBD_START; base64 -i %s; rc=$?; echo; echo __BBD_RC=$rc" % shlex.quote(remote_path),
+                         120, retry_after_start=True)
+    lines = out.split("\n")
+    rc_line = next((l for l in reversed(lines) if l.startswith("__BBD_RC=")), None)
+    if rc_line != "__BBD_RC=0":
+        raise Exit(1, "could not copy the screenshot %s back from the VM host (%s)" % (remote_path, rc_line or "no answer"))
+    data = "".join(l.strip() for l in lines if l.strip() and not l.startswith("__BBD_"))
+    try:
+        png = base64.b64decode(data, validate=True)
+    except ValueError as e:
+        raise Exit(1, "the screenshot %s came back corrupted (%s)" % (remote_path, e))
+    if not png.startswith(b"\x89PNG"):
+        raise Exit(1, "the screenshot %s came back but is not a PNG" % remote_path)
     os.makedirs(os.path.dirname(os.path.abspath(local_path)), exist_ok=True)
     with open(local_path, "wb") as f:
-        f.write(base64.b64decode(data))
+        f.write(png)
 
 
 # ---- main -------------------------------------------------------------------------
+def run_local(argv):
+    cmd, args = argv[0], list(argv[1:])
+    if cmd == "peek":
+        return cmd_peek(args)
+    if cmd == "reap":
+        return cmd_reap(args)
+    if cmd in ("lease", "act", "renew", "release"):
+        if not args or args[0].startswith("-"):
+            raise Exit(1, "usage: bb-desktop %s <owner> ..." % cmd)
+        owner = args.pop(0)
+        return {"lease": cmd_lease, "act": cmd_act, "renew": cmd_renew, "release": cmd_release}[cmd](owner, args)
+    raise Exit(1, "unknown command %s (lease|act|renew|peek|release|reap)" % cmd)
+
+
 def main(argv):
     global TMAC
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__, file=sys.stderr)
         return 1
     TMAC = local_tmac()
-    cmd = argv[0]
+    rid = os.environ.get("BB_DESKTOP_REQUEST_ID") if TMAC else None
     try:
         if TMAC is None:
             rc, reply = remote(argv)
         else:
-            args = list(argv[1:])
-            if cmd == "peek":
-                reply = cmd_peek(args)
-            elif cmd == "reap":
-                reply = cmd_reap(args)
-            elif cmd in ("lease", "act", "renew", "release"):
-                if not args or args[0].startswith("-"):
-                    raise Exit(1, "usage: bb-desktop %s <owner> ..." % cmd)
-                owner = args.pop(0)
-                reply = {"lease": cmd_lease, "act": cmd_act, "renew": cmd_renew, "release": cmd_release}[cmd](owner, args)
-            else:
-                raise Exit(1, "unknown command %s (lease|act|renew|peek|release|reap)" % cmd)
-            rc = 0
+            prior = request_claim(rid, budget(argv)) if rid else None
+            if prior:
+                rc, reply = prior
+                print(json.dumps(reply))
+                return rc
+            try:
+                rc, reply = 0, run_local(argv)
+            except Exit as e:
+                print(e.msg, file=sys.stderr)
+                rc, reply = e.code, dict(error=e.msg, **e.extra)
+            if rid:
+                request_done(rid, rc, reply)
     except Exit as e:
         print(e.msg, file=sys.stderr)
         rc, reply = e.code, dict(error=e.msg, **e.extra)

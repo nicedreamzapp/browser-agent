@@ -509,9 +509,21 @@ def stage():
 BB_DESKTOP = os.path.join(os.path.dirname(os.path.realpath(__file__)), "bb-desktop")
 
 
-def _desktop(*args, timeout=600):
+def _desktop_timeout(args):
+    """How long to wait for bb-desktop: its own budget on the VM host (see budget() there)
+    plus room for ssh or the relay and a screenshot copy."""
+    cmd = args[0] if args else ""
+    host = {"lease": 400, "release": 240, "reap": 600}.get(cmd, 120)
+    if cmd == "act" and "type" in args:
+        host = 60 + 2 * len(" ".join(args[args.index("type") + 1:]))
+    return host + 90
+
+
+def _desktop(*args, timeout=None):
     import subprocess
-    p = subprocess.run([sys.executable, BB_DESKTOP, *map(str, args)], capture_output=True, text=True,
+    args = [str(a) for a in args]
+    timeout = timeout or _desktop_timeout(args)
+    p = subprocess.run([sys.executable, BB_DESKTOP, *args], capture_output=True, text=True,
                        timeout=timeout)
     lines = [l for l in p.stdout.splitlines() if l.startswith("{")]
     reply = json.loads(lines[-1]) if lines else {}
@@ -587,7 +599,7 @@ def desktop_lease(owner, purpose=None, vm="default", ttl=1800):
     def keepalive():
         while not stop.wait(max(30, min(300, ttl // 3))):
             try:
-                _desktop("renew", owner, "--vm", vm, timeout=180)
+                _desktop("renew", owner, "--vm", vm)
             except Exception as e:
                 _log(f"desktop renew failed for {owner}: {e}")
 
@@ -598,6 +610,6 @@ def desktop_lease(owner, purpose=None, vm="default", ttl=1800):
     finally:
         stop.set()
         try:
-            _desktop("release", owner, "--vm", vm, timeout=180)
+            _desktop("release", owner, "--vm", vm)
         except Exception as e:
             _log(f"desktop release failed for {owner}: {e}")

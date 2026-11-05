@@ -325,7 +325,11 @@ with desktop_lease("my-agent", purpose="clean install test") as d:
 A lease lasts `--ttl` seconds (1800) past the last action, then it is free to take. The same owner
 leasing and releasing it twice in 10 minutes is refused with exit 5: stop and ask. Every action is
 one line in `desktop.log` (typed text is logged by length only). The lease state lives on the
-machine that runs the VM; on a machine without terminal-mac the command runs there over ssh.
+machine that runs the VM; on a machine without terminal-mac the command runs there over ssh (LAN
+first, then a relay), and a repeat of the same request returns the first result instead of acting
+twice. Where that machine is lives outside the repo, in `~/.config/browser-agent/desktop.env`
+(chmod 600): `BB_DESKTOP_MINI=user@vm-host.lan`, `BB_DESKTOP_RELAY=user@relay.example.com`,
+`BB_DESKTOP_RELAY_RUN="/path/run-on.sh vm-host"`.
 Nothing idle keeps running: `release` and an expired lease suspend the VM to disk when the installed
 terminal-mac has `suspend` (its RAM is freed), else pause it (CPU stops, RAM stays); `lease` wakes it, and
 `bb-desktop reap` (a launchd job every 5 minutes, plain code, installed by `install.sh` where

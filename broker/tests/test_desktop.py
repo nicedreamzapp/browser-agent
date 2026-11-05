@@ -1,5 +1,5 @@
 """bb-desktop: the desktop lease on the virtual Mac, against a fake terminal-mac on PATH."""
-import importlib.machinery, importlib.util, json, os, stat, subprocess, sys, time
+import base64, fcntl, importlib.machinery, importlib.util, json, os, stat, subprocess, sys, time
 
 import pytest
 
@@ -19,8 +19,15 @@ if a[0] == "--help":
 if a[0] in ("suspend", "restore") and not suspend_ok:
     print("terminal-mac: Unknown command: " + a[0], file=sys.stderr); sys.exit(1)
 if a[0] == "suspend":
+    import time; time.sleep(float(os.environ.get("FAKE_TMAC_SUSPEND_SLEEP", "0")))
+    if os.environ.get("FAKE_TMAC_SUSPEND_FAIL"):
+        print("terminal-mac: could not save the VM state", file=sys.stderr); sys.exit(1)
     open(os.environ["FAKE_TMAC_STATE"], "w").write("stopped"); print("{}"); sys.exit(0)
 if a[0] == "restore":
+    if os.environ.get("FAKE_TMAC_RESTORE_ERR"):
+        print("terminal-mac: " + os.environ["FAKE_TMAC_RESTORE_ERR"], file=sys.stderr); sys.exit(1)
+    open(os.environ["FAKE_TMAC_STATE"], "w").write("running"); print("{}"); sys.exit(0)
+if a[0] == "start":
     open(os.environ["FAKE_TMAC_STATE"], "w").write("running"); print("{}"); sys.exit(0)
 if a[0] == "status":
     print(json.dumps({"name": a[1], "state": vm_state})); sys.exit(0)
@@ -61,7 +68,11 @@ def env(tmp_path):
              FAKE_TMAC_LOG=str(tmp_path / "calls.log"), FAKE_TMAC_STATE=str(tmp_path / "vmstate"),
              BB_DESKTOP_STATE=str(tmp_path / "lease.json"), BB_DESKTOP_LOG=str(tmp_path / "desktop.log"),
              BB_DESKTOP_SHOTS=str(tmp_path / "shots"), BB_DESKTOP_TMAC=str(fake),
-             BB_DESKTOP_PS_FILE=str(tmp_path / "ps.txt"))
+             BB_DESKTOP_PS_FILE=str(tmp_path / "ps.txt"), BB_DESKTOP_CPU="0",
+             BB_DESKTOP_CONFIG=str(tmp_path / "no-config.env"))
+    for k in ("BB_DESKTOP_MINI", "BB_DESKTOP_RELAY", "BB_DESKTOP_RELAY_RUN", "BB_DESKTOP_SUSPEND",
+              "BB_DESKTOP_REQUEST_ID", "BB_DESKTOP_IDLE", "BB_DESKTOP_LOCK_WAIT"):
+        e.pop(k, None)
     (tmp_path / "ps.txt").write_text("/sbin/launchd\n/Users/x/.local/lib/terminal-mac/TerminalMac.app/Contents/MacOS/"
                                      "terminal-mac __run default\n/Users/x/.local/bin/terminal-mac mcp\n")
     e["tmp"] = str(tmp_path)
@@ -193,7 +204,7 @@ def test_act_passes_through_for_the_holder_only(env):
 
 
 def test_act_renews_the_ttl(env):
-    run(env, "lease", "a", "--ttl", "2")
+    run(env, "lease", "a", "--ttl", "5")
     before = json.load(open(env["BB_DESKTOP_STATE"]))["default"]["lease"]["expires"]
     time.sleep(1.1)
     run(env, "act", "a", "key", "a")
@@ -226,20 +237,28 @@ def test_local_when_terminal_mac_exists_else_remote(env, tmp_path, monkeypatch):
     # no terminal-mac here: the command goes to the mini, LAN first, relay second
     fake_ssh = tmp_path / "sshbin" / "ssh"
     fake_ssh.parent.mkdir()
-    fake_ssh.write_text("#!/bin/sh\necho \"$@\" >> %s\ncase \"$*\" in *fia-run-on*) "
-                        "echo '{\"leased\": true}'; echo __BBD_RC=0;; *) exit 255;; esac\n" % (tmp_path / "ssh.log"))
+    fake_ssh.write_text("#!/bin/sh\necho \"$@\" >> %s\ncase \"$*\" in *run-on.sh*) "
+                        "echo __BBD_START; echo '{\"leased\": true}'; echo __BBD_RC=0;; *) exit 255;; esac\n"
+                        % (tmp_path / "ssh.log"))
     fake_ssh.chmod(0o755)
-    e = dict(env, BB_DESKTOP_TMAC="", PATH=str(fake_ssh.parent) + os.pathsep + "/usr/bin:/bin")
+    e = remote_env(env, fake_ssh)
     rc, r, _ = run(e, "lease", "far-agent")
-    assert rc == 0 and r["leased"] and r["ran_on"] == "mini via relay"
+    assert rc == 0 and r["leased"] and r["ran_on"] == "VM host via relay"
     tried = open(tmp_path / "ssh.log").read().splitlines()
-    assert len(tried) == 2 and "192.168.1.84" in tried[0] and "fia-run-on.sh mini" in tried[1]
+    assert len(tried) == 2 and "user@vm-host.lan" in tried[0] and "run-on.sh vm-host" in tried[1]
+    assert "BB_DESKTOP_REQUEST_ID=" in base64.b64decode(tried[1].split("echo ")[1].split(" |")[0]).decode()
     assert calls(env) == []     # nothing ran against the local fake
+
+
+def remote_env(env, fake_ssh):
+    return dict(env, BB_DESKTOP_TMAC="", PATH=str(fake_ssh.parent) + os.pathsep + "/usr/bin:/bin",
+                BB_DESKTOP_MINI="user@vm-host.lan", BB_DESKTOP_RELAY="relay@relay.example",
+                BB_DESKTOP_RELAY_RUN="/opt/run-on.sh vm-host")
 
 
 def test_broker_client_desktop_lease_shells_out_and_releases(env, monkeypatch):
     for k in ("PATH", "FAKE_TMAC_LOG", "FAKE_TMAC_STATE", "BB_DESKTOP_STATE", "BB_DESKTOP_LOG",
-              "BB_DESKTOP_SHOTS", "BB_DESKTOP_TMAC"):
+              "BB_DESKTOP_SHOTS", "BB_DESKTOP_TMAC", "BB_DESKTOP_CONFIG", "BB_DESKTOP_CPU", "BB_DESKTOP_PS_FILE"):
         monkeypatch.setenv(k, env[k])
     import broker_client as bc
     with pytest.raises(RuntimeError):
@@ -334,7 +353,7 @@ def test_suspend_when_terminal_mac_has_it_and_lease_restores(env):
     assert rc == 0 and vm_state(env) == "running"
     c = calls(env)
     assert c.index(["restore", "default"]) < c.index(["action", "default", "status"])
-    assert not json.load(open(env["BB_DESKTOP_STATE"]))["default"]["suspended"]
+    assert not json.load(open(env["BB_DESKTOP_STATE"]))["default"].get("suspended")
     # the capability is read from --help once per binary, then cached
     run(e, "release", "b")
     run(e, "lease", "c")
@@ -364,3 +383,185 @@ def test_reap_and_expiry_suspend_too(env):
     assert r["reap"]["default"] is True and ["suspend", "default"] in calls(env)
     rc, r, _ = run(dict(e, BB_DESKTOP_IDLE="0"), "reap")
     assert r["reap"]["default"] == "already stopped"
+
+
+
+# ---- review fixes (2026-11-04) -------------------------------------------------------
+def state_of(env):
+    return json.load(open(env["BB_DESKTOP_STATE"]))["default"]
+
+
+def edit_state(env, **fields):
+    st = json.load(open(env["BB_DESKTOP_STATE"]))
+    st["default"].update(fields)
+    json.dump(st, open(env["BB_DESKTOP_STATE"], "w"))
+
+
+def test_a_repeated_request_id_runs_once_and_returns_the_first_result(env):
+    run(env, "lease", "a")
+    clear_calls(env)
+    e = dict(env, BB_DESKTOP_REQUEST_ID="req-1")
+    rc1, r1, _ = run(e, "act", "a", "type", "hi")
+    rc2, r2, _ = run(e, "act", "a", "type", "hi")
+    assert rc1 == rc2 == 0 and r2.get("repeat") and r2["typed_chars"] == 2
+    assert [c[3] for c in calls(env) if c[2:3] == ["key"]] == ["h", "i"]      # typed once, not twice
+    # a refused request is remembered too
+    rc, r, _ = run(dict(env, BB_DESKTOP_REQUEST_ID="req-2"), "act", "nobody", "key", "a")
+    rc2, r2, _ = run(dict(env, BB_DESKTOP_REQUEST_ID="req-2"), "act", "nobody", "key", "a")
+    assert rc == rc2 == 3 and r2.get("repeat")
+
+
+def test_lan_run_that_started_is_never_resent_over_the_relay(env, tmp_path):
+    fake_ssh = tmp_path / "sshbin" / "ssh"
+    fake_ssh.parent.mkdir()
+    # the LAN connects, the command starts, then the answer is lost
+    fake_ssh.write_text("#!/bin/sh\necho \"$@\" >> %s\ncase \"$*\" in *run-on.sh*) echo __BBD_START;"
+                        " echo '{}'; echo __BBD_RC=0;; *) echo __BBD_START;; esac\n" % (tmp_path / "ssh.log"))
+    fake_ssh.chmod(0o755)
+    rc, r, err = run(remote_env(env, fake_ssh), "act", "a", "type", "hello")
+    assert rc == 1 and "not re-sent" in err
+    tried = open(tmp_path / "ssh.log").read().splitlines()
+    assert len(tried) == 1 and "vm-host.lan" in tried[0]
+    # only a failed connection (ssh exit 255, nothing started) goes to the relay
+    fake_ssh.write_text("#!/bin/sh\necho \"$@\" >> %s\ncase \"$*\" in *run-on.sh*) echo __BBD_START;"
+                        " echo '{\"ok\": 1}'; echo __BBD_RC=0;; *) exit 255;; esac\n" % (tmp_path / "ssh.log"))
+    rc, r, _ = run(remote_env(env, fake_ssh), "peek")
+    assert rc == 0 and r["ran_on"] == "VM host via relay"
+
+
+def test_state_lock_waits_a_bounded_time(env):
+    run(env, "lease", "a")
+    with open(env["BB_DESKTOP_STATE"] + ".lock", "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        t = time.time()
+        rc, r, err = run(dict(env, BB_DESKTOP_LOCK_WAIT="0.5"), "act", "a", "key", "a")
+        assert rc == 1 and "locked" in err and time.time() - t < 10
+
+
+def test_suspend_runs_outside_the_lock_with_the_flag_set_first(env):
+    e = dict(env, FAKE_TMAC_SUSPEND="1", FAKE_TMAC_SUSPEND_SLEEP="2")
+    run(e, "lease", "a")
+    p = subprocess.Popen([sys.executable, BIN, "release", "a"], env=e, stdout=subprocess.PIPE, text=True)
+    time.sleep(1.0)
+    rc, r, _ = run(dict(e, BB_DESKTOP_LOCK_WAIT="0.5"), "peek")     # the lock is free mid-suspend
+    assert rc == 0 and r.get("suspending")
+    mid = state_of(env)
+    assert mid["suspended"] is True and mid["suspending"]
+    # a lease that arrives mid-suspend waits for it to finish, then restores the VM
+    clear_calls(env)
+    rc, r, _ = run(e, "lease", "b")
+    assert rc == 0 and vm_state(env) == "running"
+    assert p.wait(20) == 0
+    c = calls(env)
+    assert ["restore", "default"] in c
+    assert "suspending" not in state_of(env) and not state_of(env).get("suspended")
+
+
+def test_act_refused_while_suspending_and_stale_mark_ignored(env):
+    run(env, "lease", "a")
+    edit_state(env, suspending={"since": time.time(), "how": "suspend"})
+    rc, r, err = run(env, "act", "a", "key", "a")
+    assert rc == 2 and "being suspended" in err
+    edit_state(env, suspending={"since": time.time() - 3600, "how": "suspend"})
+    assert run(env, "act", "a", "key", "a")[0] == 0
+
+
+def test_a_failed_suspend_clears_the_flag(env):
+    e = dict(env, FAKE_TMAC_SUSPEND="1", FAKE_TMAC_SUSPEND_FAIL="1")
+    run(e, "lease", "a")
+    rc, r, _ = run(e, "release", "a")
+    assert rc == 0 and str(r["paused"]).startswith("pause failed")
+    st = state_of(env)
+    assert "suspended" not in st and "suspending" not in st
+    assert "suspend FAILED" in open(env["BB_DESKTOP_LOG"]).read()
+
+
+def test_timeouts_cover_the_slowest_path():
+    m = load_module()
+    assert m.budget(["lease", "a"]) >= 180 + 120 + 60
+    assert m.budget(["release", "a"]) >= 30 + 180
+    assert m.budget(["act", "a", "type"] + ["x"] * 100) > 120
+    import broker_client as bc
+    for argv in (["lease", "a"], ["release", "a"], ["act", "a", "type", "--text", "y" * 300], ["peek"]):
+        assert bc._desktop_timeout(argv) > m.budget(argv) + 30     # host budget + remote slack
+
+
+def test_stale_suspended_flag_never_boots_the_vm(env):
+    e = dict(env, FAKE_TMAC_SUSPEND="1")
+    assert run(e, "lease", "a")[0] == 0
+    run(e, "release", "a")
+    assert state_of(env)["suspended"] is True
+    open(env["FAKE_TMAC_STATE"], "w").write("running")      # woken outside the broker
+    clear_calls(env)
+    assert run(e, "lease", "b")[0] == 0
+    assert "suspended" not in state_of(env)                 # cleared when status read running
+    assert ["restore", "default"] not in calls(env) and ["start", "default"] not in calls(env)
+
+
+def test_restore_failure_refuses_unless_there_is_no_saved_state(env):
+    e = dict(env, FAKE_TMAC_SUSPEND="1")
+    run(e, "lease", "a")
+    run(e, "release", "a")
+    clear_calls(env)
+    rc, r, err = run(dict(e, FAKE_TMAC_RESTORE_ERR="the disk image is busy"), "lease", "b")
+    assert rc == 2 and "ask the human" in err and ["start", "default"] not in calls(env)
+    rc, r, _ = run(dict(e, FAKE_TMAC_RESTORE_ERR="No saved state for default"), "lease", "c")
+    assert rc == 0 and ["start", "default"] in calls(env) and vm_state(env) == "running"
+
+
+def test_reap_gives_a_vm_it_did_not_wake_a_fresh_10_minutes(env):
+    # running, no lease, an old last_used from long ago: Matt started it over Screen Sharing
+    run(env, "lease", "a")
+    run(env, "release", "a")           # pauses it (fake pause) and clears "ours"
+    open(env["FAKE_TMAC_STATE"], "w").write("running")
+    edit_state(env, last_used=time.time() - 7200)
+    e = dict(env, BB_DESKTOP_IDLE="1")
+    rc, r, _ = run(e, "reap")
+    assert r["reap"]["default"] == "first seen running; idle clock started" and vm_state(env) == "running"
+    rc, r, _ = run(e, "reap")
+    assert vm_state(env) == "running"   # under a second since first sight
+    time.sleep(1.2)
+    rc, r, _ = run(dict(e, BB_DESKTOP_CPU="45"), "reap")
+    assert r["reap"]["default"].startswith("busy") and vm_state(env) == "running"
+    rc, r, _ = run(e, "reap")
+    assert r["reap"]["default"] is True and vm_state(env) == "paused"
+
+
+def test_fetch_fails_loudly(env, monkeypatch):
+    m = load_module()
+    png = base64.b64encode(b"\x89PNG data").decode()
+    out = {"v": ""}
+    monkeypatch.setattr(m, "run_on_mini", lambda script, timeout, retry_after_start=False: (out["v"], "lan"))
+    dest = os.path.join(env["tmp"], "f.png")
+    out["v"] = "__BBD_START\n%s\n\n__BBD_RC=0\n" % png
+    m.fetch("/tmp/x.png", dest)
+    assert open(dest, "rb").read() == b"\x89PNG data"
+    for bad in ("__BBD_START\n\n__BBD_RC=1\n", "__BBD_START\n%s!!\n__BBD_RC=0\n" % png[:-2],
+                "__BBD_START\n%s\n" % png, "__BBD_START\n%s\n__BBD_RC=0\n" % base64.b64encode(b"nope").decode()):
+        out["v"] = bad
+        with pytest.raises(m.Exit):
+            m.fetch("/tmp/x.png", dest)
+
+
+def test_host_addresses_come_from_config_not_the_repo(tmp_path, monkeypatch):
+    cfg = tmp_path / "desktop.env"
+    cfg.write_text("# comment\nBB_DESKTOP_MINI=user@from-file\nBB_DESKTOP_RELAY='relay@from-file'\n")
+    m = load_module()
+    monkeypatch.delenv("BB_DESKTOP_MINI", raising=False)
+    monkeypatch.setenv("BB_DESKTOP_RELAY", "relay@from-env")
+    m._load_config(str(cfg))
+    assert os.environ["BB_DESKTOP_MINI"] == "user@from-file"
+    assert os.environ["BB_DESKTOP_RELAY"] == "relay@from-env"      # the environment wins
+    monkeypatch.delenv("BB_DESKTOP_MINI")
+    import re as _re
+    for f in (BIN, __file__, os.path.join(ROOT, "README.md")):
+        text = open(f).read()
+        assert not _re.search(r"192\.168\.\d|10\.\d+\.\d+\.\d+|\broot@\d", text), f
+
+
+def test_unquoted_words_are_all_typed(env):
+    run(env, "lease", "a")
+    clear_calls(env)
+    rc, r, _ = run(env, "act", "a", "type", "hi", "you")
+    assert rc == 0 and r["typed_chars"] == 6
+    assert [c[3] for c in calls(env)] == ["h", "i", "space", "y", "o", "u"]
