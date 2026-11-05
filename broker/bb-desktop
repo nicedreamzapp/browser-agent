@@ -22,7 +22,8 @@ The guest has none of Matt's logins.
     bb-desktop reap                                  pause every VM with no lease, idle 10+ min (launchd, 5 min)
 
 Matt (2026-11-04, 10:20 PM): every model and job that is done frees its memory. So
-release (and an expired lease) pauses the VM, lease resumes it, and `reap` (plain code,
+release (and an expired lease) suspends the VM to disk (or pauses it, on a terminal-mac
+without `suspend`; a pause stops the CPU but keeps the RAM), lease wakes it, and `reap` (plain code,
 no model) pauses any running VM that has no lease and has sat idle 10+ minutes. A VM is
 never paused while a lease is live or while a `terminal-mac view` viewer is attached.
 
@@ -36,7 +37,7 @@ its guest helper is not ready · 3 you do not hold the lease · 4 another owner 
 it (the reply says who and why) · 5 stuck: this owner leased and released it twice
 in the last 10 minutes; stop and ask the human in one line.
 """
-import base64, json, os, shlex, shutil, subprocess, sys, time
+import base64, json, os, re, shlex, shutil, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 STATE = os.environ.get("BB_DESKTOP_STATE", os.path.join(HERE, "desktop-lease.json"))
@@ -180,20 +181,90 @@ def holder_or_exit(st, vm, owner, now):
     return rec, lease
 
 
+def supports_suspend():
+    """True when the installed terminal-mac has `suspend` (save state to disk and exit, so
+    the VM's RAM is freed; our fork adds it). Read from its --help once per binary and cached."""
+    forced = os.environ.get("BB_DESKTOP_SUSPEND")
+    if forced in ("0", "1"):
+        return forced == "1"
+    try:
+        real = os.path.realpath(TMAC)
+        info = os.stat(real)
+        key = "%s:%d:%d" % (real, info.st_mtime, info.st_size)
+    except OSError:
+        return False
+    cache = STATE + ".caps"
+    try:
+        with open(cache) as f:
+            c = json.load(f)
+        if c.get("key") == key:
+            return bool(c["suspend"])
+    except (OSError, ValueError, KeyError):
+        pass
+    try:
+        p = subprocess.run([TMAC, "--help"], capture_output=True, text=True, timeout=20)
+        text = p.stdout + p.stderr
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    ok = any(re.match(r"\s*(\S+\|)*suspend(\||\s|$)", line) for line in text.splitlines())
+    try:
+        with open(cache, "w") as f:
+            json.dump({"key": key, "suspend": ok}, f)
+    except OSError:
+        pass
+    return ok
+
+
+def was_suspended(vm, flag=None):
+    """Whether we suspended `vm` (a suspended VM reads as stopped). With flag, record it."""
+    with State() as st:
+        rec = st.vm(vm)
+        if flag is None:
+            return bool(rec.get("suspended"))
+        rec["suspended"] = flag
+        st.save()
+
+
+def wait_state(vm, want, seconds):
+    end = time.time() + seconds
+    while True:
+        st = tmac("status", vm, timeout=30).get("state")
+        if st == want or time.time() > end:
+            return st
+        time.sleep(2)
+
+
 def check_ready(vm):
-    """Resume a paused VM; refuse unless the guest helper has both permissions."""
+    """Wake a paused or suspended VM; refuse unless the guest helper has both permissions."""
     st = tmac("status", vm, timeout=30).get("state")
+    woke = False
     if st == "paused":
         tmac("resume", vm, timeout=60)
         log("vm=%s was paused; resumed" % vm)
-        st = "running"
+        st, woke = "running", True
+    elif st == "suspended" or (st == "stopped" and was_suspended(vm)):
+        try:
+            tmac("restore", vm, timeout=180)
+        except Exit:
+            tmac("start", vm, timeout=180)    # the fork's start restores a saved state too
+        st = wait_state(vm, "running", 120)
+        log("vm=%s was suspended; restored (%s)" % (vm, st))
+        was_suspended(vm, False)
+        woke = True
     if st != "running":
         raise Exit(2, "the VM %s is %s, not running; ask the human before starting it (terminal-mac start %s)"
                    % (vm, st, vm), vm_state=st)
-    try:
-        a = tmac("action", vm, "status", timeout=30)
-    except Exit as e:
-        raise Exit(2, "the guest helper in %s is not answering (%s); it needs setup inside the VM" % (vm, e.msg))
+    # A just-woken guest may need a few seconds before its helper answers again.
+    end = time.time() + (60 if woke else 0)
+    while True:
+        try:
+            a = tmac("action", vm, "status", timeout=30)
+            break
+        except Exit as e:
+            if time.time() < end:
+                time.sleep(3)
+                continue
+            raise Exit(2, "the guest helper in %s is not answering (%s); it needs setup inside the VM" % (vm, e.msg))
     if str(a.get("accessibility")).lower() != "true" or str(a.get("screenRecording")).lower() != "true":
         raise Exit(2, "the guest helper in %s is missing permissions (accessibility=%s, screenRecording=%s);"
                    " the human must grant them inside the VM" % (vm, a.get("accessibility"), a.get("screenRecording")))
@@ -310,8 +381,8 @@ def viewers(vm):
 
 
 def pause_if_free(vm, why):
-    """Pause `vm` unless a lease is live on it or a viewer is attached. Returns True when it
-    paused, else the reason it did not."""
+    """Suspend `vm` (state to disk, RAM freed) when terminal-mac can, else pause it, unless a
+    lease is live on it or a viewer is attached. Returns True when it did, else the reason."""
     with State() as st:     # held through the pause, so no lease can start in between
         lease = live(st.vm(vm), vm, time.time())
         st.save()
@@ -324,11 +395,15 @@ def pause_if_free(vm, why):
             state = tmac("status", vm, timeout=30).get("state")
             if state != "running":
                 return "already %s" % state
-            tmac("pause", vm, timeout=60)
+            how = "suspend" if supports_suspend() else "pause"
+            tmac(how, vm, timeout=180 if how == "suspend" else 60)
         except Exit as e:
             log("vm=%s pause FAILED (%s): %s" % (vm, why, e.msg[:120]))
             return "pause failed: %s" % e.msg[:120]
-    log("vm=%s paused (%s)" % (vm, why))
+        if how == "suspend":
+            st.vm(vm)["suspended"] = True
+            st.save()
+    log("vm=%s %s (%s)" % (vm, "suspended" if how == "suspend" else "paused", why))
     return True
 
 

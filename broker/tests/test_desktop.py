@@ -12,6 +12,16 @@ a = sys.argv[1:]
 with open(os.environ["FAKE_TMAC_LOG"], "a") as f:
     f.write(json.dumps(a) + "\n")
 vm_state = open(os.environ["FAKE_TMAC_STATE"]).read().strip()
+suspend_ok = os.environ.get("FAKE_TMAC_SUSPEND") == "1"
+if a[0] == "--help":
+    print("    status|pause|resume%s [NAME]   Manage the VM" % ("|suspend" if suspend_ok else ""))
+    print("    action [NAME] status"); sys.exit(0)
+if a[0] in ("suspend", "restore") and not suspend_ok:
+    print("terminal-mac: Unknown command: " + a[0], file=sys.stderr); sys.exit(1)
+if a[0] == "suspend":
+    open(os.environ["FAKE_TMAC_STATE"], "w").write("stopped"); print("{}"); sys.exit(0)
+if a[0] == "restore":
+    open(os.environ["FAKE_TMAC_STATE"], "w").write("running"); print("{}"); sys.exit(0)
 if a[0] == "status":
     print(json.dumps({"name": a[1], "state": vm_state})); sys.exit(0)
 if a[0] == "resume":
@@ -308,3 +318,49 @@ def test_expired_lease_is_paused_by_reap(env):
     rc, r, _ = run(env, "reap")
     assert r["reap"]["default"] is True and vm_state(env) == "paused"
     assert "paused (lease expired)" in open(env["BB_DESKTOP_LOG"]).read()
+
+
+def test_suspend_when_terminal_mac_has_it_and_lease_restores(env):
+    e = dict(env, FAKE_TMAC_SUSPEND="1")
+    run(e, "lease", "a")
+    rc, r, _ = run(e, "release", "a")
+    assert rc == 0 and r["paused"] is True
+    assert calls(env).count(["--help"]) == 1
+    assert ["suspend", "default"] in calls(env) and ["pause", "default"] not in calls(env)
+    assert vm_state(env) == "stopped"       # a suspended VM exits, so it reads as stopped
+    assert "suspended (released by a)" in open(env["BB_DESKTOP_LOG"]).read()
+    clear_calls(env)
+    rc, r, _ = run(e, "lease", "b")
+    assert rc == 0 and vm_state(env) == "running"
+    c = calls(env)
+    assert c.index(["restore", "default"]) < c.index(["action", "default", "status"])
+    assert not json.load(open(env["BB_DESKTOP_STATE"]))["default"]["suspended"]
+    # the capability is read from --help once per binary, then cached
+    run(e, "release", "b")
+    run(e, "lease", "c")
+    run(e, "release", "c")
+    assert sum(1 for x in calls(env) if x == ["--help"]) == 0
+
+
+def test_pause_fallback_without_suspend_and_stopped_vm_still_refused(env):
+    run(env, "lease", "a")
+    run(env, "release", "a")
+    assert ["--help"] in calls(env)
+    assert ["pause", "default"] in calls(env) and ["suspend", "default"] not in calls(env)
+    assert vm_state(env) == "paused"
+    assert run(env, "lease", "b")[0] == 0 and vm_state(env) == "running"
+    run(env, "release", "b")
+    # a VM we did not suspend that is stopped is not ours to start
+    open(env["FAKE_TMAC_STATE"], "w").write("stopped")
+    rc, r, _ = run(env, "lease", "c")
+    assert rc == 2 and r["vm_state"] == "stopped" and ["restore", "default"] not in calls(env)
+
+
+def test_reap_and_expiry_suspend_too(env):
+    e = dict(env, FAKE_TMAC_SUSPEND="1")
+    run(e, "lease", "a", "--ttl", "1")
+    time.sleep(1.2)
+    rc, r, _ = run(e, "reap")
+    assert r["reap"]["default"] is True and ["suspend", "default"] in calls(env)
+    rc, r, _ = run(dict(e, BB_DESKTOP_IDLE="0"), "reap")
+    assert r["reap"]["default"] == "already stopped"
