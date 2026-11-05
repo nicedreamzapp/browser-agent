@@ -13,6 +13,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SHELL_SCRIPTS = sorted(glob.glob(os.path.join(ROOT, "*.sh"))) + [os.path.join(ROOT, n) for n in
                                                                   ("bb-show", "bb-close", "bb-peek")]
 PLIST = os.path.join(ROOT, "launchd", "com.browser-broker.plist")
+REAP_PLIST = os.path.join(ROOT, "launchd", "com.browser-broker.desktop-reap.plist")
 
 
 @pytest.mark.skipif(not shutil.which("bash"), reason="needs bash")
@@ -22,7 +23,7 @@ def test_shell_scripts_parse(script):
     assert p.returncode == 0, p.stderr
 
 
-@pytest.mark.parametrize("path", ["bb-show", "bb-close", "bb-peek", "bb-click", "bb-desktop", "get.sh", "install.sh", "launch-browser.sh",
+@pytest.mark.parametrize("path", ["bb-show", "bb-close", "bb-peek", "bb-click", "bb-desktop", "get.sh", "install.sh", "install-desktop-reap.sh", "launch-browser.sh",
                                   "brave-cdp-guard.sh", "uninstall.sh"])
 def test_scripts_are_executable_in_git(path):
     # ROOT may be a subfolder of the checkout (broker/ inside browser-agent), so ask git
@@ -43,6 +44,14 @@ def test_launchd_plist_is_well_formed():
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="plutil and launchd are macOS only")
-def test_launchd_plist_lints_on_macos():
-    p = subprocess.run(["plutil", "-lint", PLIST], capture_output=True, text=True)
+@pytest.mark.parametrize("plist", [PLIST, REAP_PLIST], ids=os.path.basename)
+def test_launchd_plist_lints_on_macos(plist):
+    p = subprocess.run(["plutil", "-lint", plist], capture_output=True, text=True)
     assert p.returncode == 0, p.stdout + p.stderr
+
+
+def test_desktop_reap_plist_runs_reap_every_5_minutes():
+    with open(REAP_PLIST, "rb") as f:
+        p = plistlib.load(f)
+    assert p["ProgramArguments"][-2:] == ["__BROKER_DIR__/bb-desktop", "reap"]
+    assert p["StartInterval"] == 300

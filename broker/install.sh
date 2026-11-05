@@ -36,6 +36,10 @@ sed -e "s|__BROKER_DIR__|$DIR|g" -e "s|__PYTHON__|$PY|g" -e "s|__LABEL__|$LABEL|
     -e "s|<!--__ENV__-->|$ENV_XML|" "$DIR/launchd/com.browser-broker.plist" > "$PLIST"
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
+# The machine that runs the terminal-mac VM also gets the desktop-lease reaper.
+if command -v terminal-mac >/dev/null 2>&1 || [ -x "$HOME/.local/bin/terminal-mac" ]; then
+  "$DIR/install-desktop-reap.sh" || echo "desktop reaper not installed" >&2
+fi
 sleep 3
 curl -sf -m 5 "http://127.0.0.1:${BROKER_PORT:-9223}/health" && echo && echo "browser-broker installed and running" \
   || { echo "broker did not answer — is the browser up? try ./launch-browser.sh" >&2; exit 1; }

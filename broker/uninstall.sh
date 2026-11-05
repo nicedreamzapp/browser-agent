@@ -31,6 +31,9 @@ if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
   say "stopped LaunchAgent $LABEL"
 fi
 if [ -f "$PLIST" ]; then rm -f "$PLIST"; say "removed $PLIST"; fi
+REAP="$LABEL.desktop-reap"
+launchctl bootout "gui/$(id -u)/$REAP" 2>/dev/null && say "stopped LaunchAgent $REAP" || true
+rm -f "$HOME/Library/LaunchAgents/$REAP.plist"
 
 # Only remove the launcher get.sh wrote (it carries this marker).
 if [ -f "$BIN" ] && grep -q "installed by browser-agent/broker/get.sh" "$BIN" 2>/dev/null; then

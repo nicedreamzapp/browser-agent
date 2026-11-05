@@ -18,7 +18,13 @@ The guest has none of Matt's logins.
     bb-desktop act     <owner> screenshot [PATH]
     bb-desktop renew   <owner> [--vm default]
     bb-desktop peek    [--vm default]               read only: holder, purpose, expiry, VM state, fresh screenshot
-    bb-desktop release <owner> [--vm default]        ends the lease; the VM keeps running
+    bb-desktop release <owner> [--vm default]        ends the lease and pauses the VM
+    bb-desktop reap                                  pause every VM with no lease, idle 10+ min (launchd, 5 min)
+
+Matt (2026-11-04, 10:20 PM): every model and job that is done frees its memory. So
+release (and an expired lease) pauses the VM, lease resumes it, and `reap` (plain code,
+no model) pauses any running VM that has no lease and has sat idle 10+ minutes. A VM is
+never paused while a lease is live or while a `terminal-mac view` viewer is attached.
 
 Every command prints one JSON line on stdout. A lease expires TTL seconds after
 the last act/renew and is then free to take. The lease state lives on the machine
@@ -44,6 +50,7 @@ REMOTE_BIN = os.environ.get("BB_DESKTOP_REMOTE_BIN", "$HOME/Scripts/browser-agen
 NATIVE_TYPE = os.environ.get("BB_DESKTOP_NATIVE_TYPE") == "1"
 TTL = 1800
 STUCK_WINDOW, STUCK_AFTER = 600, 2
+IDLE_PAUSE = int(os.environ.get("BB_DESKTOP_IDLE", "600"))
 
 
 class Exit(Exception):
@@ -234,17 +241,20 @@ def cmd_lease(owner, args):
             log("vm=%s owner=%s refused: stuck (%d leases in 10 min)" % (vm, owner, len(recent)))
             raise Exit(5, "stuck: %s leased and released the desktop %s %d times in the last 10 minutes."
                        " Stop and ask the human in one line what is wrong." % (owner, vm, len(recent)))
-        st.save()
-    status = check_ready(vm)    # outside the lock: it can take a few seconds
-    with State() as st:
-        rec = st.vm(vm)
-        lease = live(rec, vm, time.time())
-        if lease and lease["owner"] != owner:
-            raise Exit(4, "the desktop %s was just leased by %s" % (vm, lease["owner"]), held_by=lease["owner"])
-        now = time.time()
+        # Hold it before checking the VM, so the reaper cannot pause it in between.
+        rec["last_used"] = now
         rec["lease"] = {"owner": owner, "purpose": purpose, "start": now, "expires": now + ttl, "ttl": ttl,
                         "host": os.uname().nodename}
         st.save()
+    try:
+        status = check_ready(vm)    # outside the lock: it can take a few seconds
+    except Exit:
+        with State() as st:
+            rec = st.vm(vm)
+            if (rec.get("lease") or {}).get("owner") == owner and rec["lease"]["start"] == now:
+                rec["lease"] = None
+                st.save()
+        raise
     log("vm=%s owner=%s leased ttl=%s purpose=%s" % (vm, owner, ttl, purpose or "-"))
     return {"leased": True, "vm": vm, "owner": owner, "purpose": purpose, "expires": now + ttl,
             "screen": [int(status.get("width", 1280)), int(status.get("height", 800))]}
@@ -254,7 +264,8 @@ def cmd_renew(owner, args):
     vm = opt(args, "--vm", "default")
     with State() as st:
         rec, lease = holder_or_exit(st, vm, owner, time.time())
-        lease["expires"] = time.time() + lease.get("ttl", TTL)
+        lease["expires"] = rec["last_used"] = time.time()
+        lease["expires"] += lease.get("ttl", TTL)
         st.save()
     return {"renewed": True, "vm": vm, "owner": owner, "expires": lease["expires"]}
 
@@ -266,9 +277,86 @@ def cmd_release(owner, args):
         rec, lease = holder_or_exit(st, vm, owner, now)
         rec["history"].append({"owner": owner, "leased": lease["start"], "released": now})
         rec["lease"] = None
+        rec["last_used"] = now
         st.save()
     log("vm=%s owner=%s released after %ds" % (vm, owner, now - lease["start"]))
-    return {"released": True, "vm": vm, "owner": owner}
+    return {"released": True, "vm": vm, "owner": owner, "paused": pause_if_free(vm, "released by " + owner)}
+
+
+# ---- freeing memory: pause what nobody is using -----------------------------------
+def viewers(vm):
+    """True when a `terminal-mac view` viewer is attached to `vm` (the human may be watching)."""
+    src = os.environ.get("BB_DESKTOP_PS_FILE")
+    if src:
+        text = open(src).read()
+    else:
+        text = subprocess.run(["/bin/ps", "-axo", "command"], capture_output=True, text=True).stdout
+    for line in text.splitlines():
+        parts = line.split()
+        if not parts or not os.path.basename(parts[0]).startswith("terminal-mac") or "view" not in parts[1:3]:
+            continue
+        rest, args = [], parts[parts.index("view") + 1:]
+        while args:
+            a = args.pop(0)
+            if a == "--protocol" and args:
+                args.pop(0)
+            elif not a.startswith("-"):
+                rest.append(a)
+        if (rest[0] if rest else "default") == vm:
+            return True
+    return False
+
+
+def pause_if_free(vm, why):
+    """Pause `vm` unless a lease is live on it or a viewer is attached. Returns True when it
+    paused, else the reason it did not."""
+    with State() as st:     # held through the pause, so no lease can start in between
+        lease = live(st.vm(vm), vm, time.time())
+        st.save()
+        if lease:
+            return "leased by %s" % lease["owner"]
+        if viewers(vm):
+            log("vm=%s not paused (%s): a terminal-mac viewer is attached" % (vm, why))
+            return "viewer attached"
+        try:
+            state = tmac("status", vm, timeout=30).get("state")
+            if state != "running":
+                return "already %s" % state
+            tmac("pause", vm, timeout=60)
+        except Exit as e:
+            log("vm=%s pause FAILED (%s): %s" % (vm, why, e.msg[:120]))
+            return "pause failed: %s" % e.msg[:120]
+    log("vm=%s paused (%s)" % (vm, why))
+    return True
+
+
+def cmd_reap(args):
+    """Pause every running VM whose lease expired, or that has had no lease for IDLE_PAUSE s."""
+    now = time.time()
+    try:
+        names = [m["name"] for m in tmac("ls", timeout=30) if isinstance(m, dict) and m.get("name")]
+    except (Exit, TypeError):
+        names = []
+    out = {}
+    for vm in names or ["default"]:
+        with State() as st:
+            rec = st.vm(vm)
+            had = rec.get("lease")
+            lease = live(rec, vm, now)
+            just_expired = had is not None and lease is None
+            if not lease and "last_used" not in rec:
+                rec["last_used"] = now      # first sight of an unused VM: give it the full idle window
+            idle = now - rec.get("last_used", now)
+            st.save()
+        if lease:
+            out[vm] = "leased by %s" % lease["owner"]
+        elif just_expired:
+            out[vm] = pause_if_free(vm, "lease expired")
+        elif idle >= IDLE_PAUSE:
+            out[vm] = pause_if_free(vm, "idle %d min" % (idle // 60))
+        else:
+            out[vm] = "idle %ds of %ds" % (idle, IDLE_PAUSE)
+    return {"reap": out}
 
 
 def cmd_act(owner, args):
@@ -281,7 +369,8 @@ def cmd_act(owner, args):
         raise Exit(1, "unknown act verb %s" % verb)
     with State() as st:
         rec, lease = holder_or_exit(st, vm, owner, time.time())
-        lease["expires"] = time.time() + lease.get("ttl", TTL)
+        lease["expires"] = rec["last_used"] = time.time()
+        lease["expires"] += lease.get("ttl", TTL)
         st.save()
     out = {"vm": vm, "owner": owner, "act": verb}
     try:
@@ -415,13 +504,15 @@ def main(argv):
             args = list(argv[1:])
             if cmd == "peek":
                 reply = cmd_peek(args)
+            elif cmd == "reap":
+                reply = cmd_reap(args)
             elif cmd in ("lease", "act", "renew", "release"):
                 if not args or args[0].startswith("-"):
                     raise Exit(1, "usage: bb-desktop %s <owner> ..." % cmd)
                 owner = args.pop(0)
                 reply = {"lease": cmd_lease, "act": cmd_act, "renew": cmd_renew, "release": cmd_release}[cmd](owner, args)
             else:
-                raise Exit(1, "unknown command %s (lease|act|renew|peek|release)" % cmd)
+                raise Exit(1, "unknown command %s (lease|act|renew|peek|release|reap)" % cmd)
             rc = 0
     except Exit as e:
         print(e.msg, file=sys.stderr)

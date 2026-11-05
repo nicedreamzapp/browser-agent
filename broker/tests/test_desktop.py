@@ -16,6 +16,10 @@ if a[0] == "status":
     print(json.dumps({"name": a[1], "state": vm_state})); sys.exit(0)
 if a[0] == "resume":
     open(os.environ["FAKE_TMAC_STATE"], "w").write("running"); print("{}"); sys.exit(0)
+if a[0] == "pause":
+    open(os.environ["FAKE_TMAC_STATE"], "w").write("paused"); print("{}"); sys.exit(0)
+if a[0] == "ls":
+    print(json.dumps([{"name": "default", "installed": True}])); sys.exit(0)
 if a[0] == "action":
     verb = a[2]
     if verb == "status":
@@ -46,7 +50,10 @@ def env(tmp_path):
     e.update(PATH=str(fake.parent) + os.pathsep + e["PATH"],
              FAKE_TMAC_LOG=str(tmp_path / "calls.log"), FAKE_TMAC_STATE=str(tmp_path / "vmstate"),
              BB_DESKTOP_STATE=str(tmp_path / "lease.json"), BB_DESKTOP_LOG=str(tmp_path / "desktop.log"),
-             BB_DESKTOP_SHOTS=str(tmp_path / "shots"), BB_DESKTOP_TMAC=str(fake))
+             BB_DESKTOP_SHOTS=str(tmp_path / "shots"), BB_DESKTOP_TMAC=str(fake),
+             BB_DESKTOP_PS_FILE=str(tmp_path / "ps.txt"))
+    (tmp_path / "ps.txt").write_text("/sbin/launchd\n/Users/x/.local/lib/terminal-mac/TerminalMac.app/Contents/MacOS/"
+                                     "terminal-mac __run default\n/Users/x/.local/bin/terminal-mac mcp\n")
     e["tmp"] = str(tmp_path)
     return e
 
@@ -238,3 +245,66 @@ def test_broker_client_desktop_lease_shells_out_and_releases(env, monkeypatch):
     assert st["lease"] is None and st["history"][-1]["owner"] == "ctx"
     keys = [c[3] for c in calls(env) if c[:3] == ["action", "default", "key"]]
     assert keys == ["shift+h", "i"]
+
+
+def vm_state(env):
+    return open(env["FAKE_TMAC_STATE"]).read().strip()
+
+
+def test_release_pauses_the_vm_and_lease_resumes_it(env):
+    run(env, "lease", "a")
+    rc, r, _ = run(env, "release", "a")
+    assert rc == 0 and r["paused"] is True and vm_state(env) == "paused"
+    rc, r, _ = run(env, "lease", "b")
+    assert rc == 0 and vm_state(env) == "running"
+    assert "paused (released by a)" in open(env["BB_DESKTOP_LOG"]).read()
+
+
+def test_never_paused_with_a_viewer_attached(env):
+    with open(env["BB_DESKTOP_PS_FILE"], "a") as f:
+        f.write("/Users/x/.local/bin/terminal-mac view --protocol kitty default\n")
+    run(env, "lease", "a")
+    rc, r, _ = run(env, "release", "a")
+    assert rc == 0 and r["paused"] == "viewer attached" and vm_state(env) == "running"
+    assert ["pause", "default"] not in calls(env)
+    # a viewer on another VM does not count
+    open(env["BB_DESKTOP_PS_FILE"], "w").write("/Users/x/.local/bin/terminal-mac view other\n")
+    rc, r, _ = run(env, "reap")
+    assert vm_state(env) == "running"       # released just now: not idle yet
+    e = dict(env, BB_DESKTOP_IDLE="0")
+    rc, r, _ = run(e, "reap")
+    assert r["reap"]["default"] is True and vm_state(env) == "paused"
+
+
+def test_reap_pauses_only_idle_unleased_vms(env):
+    e = dict(env, BB_DESKTOP_IDLE="1")
+    # never seen before: gets the full idle window first
+    rc, r, _ = run(e, "reap")
+    assert rc == 0 and vm_state(env) == "running" and "idle" in r["reap"]["default"]
+    # an active lease is never paused, however long it is
+    run(e, "lease", "busy")
+    time.sleep(1.2)
+    rc, r, _ = run(e, "reap")
+    assert r["reap"]["default"] == "leased by busy" and vm_state(env) == "running"
+    run(e, "release", "busy")           # pauses
+    run(e, "lease", "busy2")            # resumes
+    run(e, "act", "busy2", "key", "a")
+    st = json.load(open(env["BB_DESKTOP_STATE"]))
+    st["default"]["lease"] = None       # as if released by hand without pausing
+    json.dump(st, open(env["BB_DESKTOP_STATE"], "w"))
+    rc, r, _ = run(e, "reap")
+    assert vm_state(env) == "running"   # used under a second ago
+    time.sleep(1.2)
+    rc, r, _ = run(e, "reap")
+    assert r["reap"]["default"] is True and vm_state(env) == "paused"
+    clear_calls(env)
+    rc, r, _ = run(e, "reap")
+    assert r["reap"]["default"] == "already paused" and ["pause", "default"] not in calls(env)
+
+
+def test_expired_lease_is_paused_by_reap(env):
+    run(env, "lease", "a", "--ttl", "1")
+    time.sleep(1.2)
+    rc, r, _ = run(env, "reap")
+    assert r["reap"]["default"] is True and vm_state(env) == "paused"
+    assert "paused (lease expired)" in open(env["BB_DESKTOP_LOG"]).read()

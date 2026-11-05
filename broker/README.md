@@ -313,7 +313,7 @@ bb-desktop act    my-agent screenshot /tmp/guest.png         # look first; guest
 bb-desktop act    my-agent click 640 400
 bb-desktop act    my-agent type "Hello there."               # sent key by key
 bb-desktop peek                                              # read only: holder, purpose, expiry, fresh screenshot
-bb-desktop release my-agent                                  # the VM keeps running
+bb-desktop release my-agent                                  # and pauses the VM
 ```
 
 ```python
@@ -326,6 +326,10 @@ A lease lasts `--ttl` seconds (1800) past the last action, then it is free to ta
 leasing and releasing it twice in 10 minutes is refused with exit 5: stop and ask. Every action is
 one line in `desktop.log` (typed text is logged by length only). The lease state lives on the
 machine that runs the VM; on a machine without terminal-mac the command runs there over ssh.
+Nothing idle keeps running: `release` and an expired lease pause the VM, `lease` resumes it, and
+`bb-desktop reap` (a launchd job every 5 minutes, plain code, installed by `install.sh` where
+terminal-mac lives) pauses any VM with no lease that has sat idle 10 minutes. A VM is never paused
+while a lease is live or a `terminal-mac view` viewer is attached.
 `type` sends one key press per character because terminal-mac 0.2.0's own `type` does nothing in a
 macOS 27 guest; `--native` or `BB_DESKTOP_NATIVE_TYPE=1` switches back once that is fixed.
 
