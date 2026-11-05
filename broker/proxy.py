@@ -1244,6 +1244,21 @@ class Stage:
             if o == self.holder:
                 self.free(self._serial)
         if REG is not None:
+            # Hidden lease tabs of this owner (broker_client lease / REST /lease) that
+            # never went on screen: bb-close <owner> ends them too. Before 2026-11-05 it
+            # only saw bb-show jobs and said "nothing to close" with the lease still open.
+            # Owner name only, never a URL match: that could end another agent's lease.
+            for tid in REG.owned_by(match):
+                if STAGE is not None and STAGE.job_of(tid):
+                    continue                  # a shown job tab; the loop above handled it
+                url = live.get(tid, {}).get("url", "")
+                kids = {}
+                if await REG.close(tid, "bb-close", kids):
+                    closed.append({"target": tid[:12], "owner": match, "url": url})
+                elif tid in live:
+                    left.append({"target": tid[:12], "owner": match, "why": "the human is working in it"})
+                closed += kids.get("children_closed") or []
+                left += kids.get("children_left_open") or []
             # Children of this owner whose parent is already gone (the human closed
             # it, or a lease ended on it): bb-close <owner> still cleans them up.
             for c, i in list(REG.children.items()):

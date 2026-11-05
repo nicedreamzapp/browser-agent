@@ -174,3 +174,30 @@ def test_tabs_opened_from_the_humans_own_tab_shown_for_a_job_are_not_recorded(st
     assert from_his not in stack.reg.children
     unshow(stack, "orders")
     assert his in stack.fake.targets and from_his in stack.fake.targets
+
+
+def test_bb_close_owner_ends_a_hidden_lease_tab(stack):
+    # 2026-11-05: a Play Console job leased a hidden tab, then bb-close <owner>
+    # said "nothing to close" with the tab still open; only bb-show jobs were seen.
+    _, l = lease(stack, owner="play-trader", url="https://play.example/console")
+    kid = child(stack, l["target_id"])
+    code, u = unshow(stack, "play-trader")
+    assert code == 200
+    assert {c["target"] for c in u["closed"]} == {l["target_id"][:12], kid[:12]}
+    assert l["target_id"] not in stack.fake.targets and kid not in stack.fake.targets
+    assert l["target_id"] not in stack.reg.tabs
+
+
+def test_bb_close_url_match_never_ends_another_owners_lease(stack):
+    _, l = lease(stack, owner="someone-else", url="https://play.example/console")
+    _, u = unshow(stack, "play.example")
+    assert u["closed"] == []
+    assert l["target_id"] in stack.fake.targets
+
+
+def test_bb_close_leaves_a_lease_tab_the_human_is_working_in(stack):
+    _, l = lease(stack, owner="busy", url="https://site.example/form")
+    human_types(stack, l["target_id"])
+    _, u = unshow(stack, "busy")
+    assert u["closed"] == []
+    assert l["target_id"] in stack.fake.targets
