@@ -1233,9 +1233,11 @@ class Stage:
             return {"closed": [], "left_open": []}
         live = await self._live()
         closed, left = [], []
+        job_tabs = set()
         for o, tid in list(self.tabs.items()):
             if o != match and match not in live.get(tid, {}).get("url", ""):
                 continue
+            job_tabs.add(tid)
             res = await self._end_job(o, live)
             if res:
                 (closed if res[0] == "closed" else left).append(res[1])
@@ -1247,15 +1249,18 @@ class Stage:
             # Hidden lease tabs of this owner (broker_client lease / REST /lease) that
             # never went on screen: bb-close <owner> ends them too. Before 2026-11-05 it
             # only saw bb-show jobs and said "nothing to close" with the lease still open.
-            # Owner name only, never a URL match: that could end another agent's lease.
+            # Only tabs the broker opened for a REST lease: never a tab adopted from a
+            # shown job (it may be his own tab), never a live CDP client's tab, never
+            # a URL match (that could end another agent's lease).
             for tid in REG.owned_by(match):
-                if STAGE is not None and STAGE.job_of(tid):
-                    continue                  # a shown job tab; the loop above handled it
+                i = REG.tabs.get(tid) or {}
+                if tid in job_tabs or i.get("kind") != "rest" or i.get("shared") or self.job_of(tid):
+                    continue
                 url = live.get(tid, {}).get("url", "")
                 kids = {}
                 if await REG.close(tid, "bb-close", kids):
                     closed.append({"target": tid[:12], "owner": match, "url": url})
-                elif tid in live:
+                elif tid in await self._live():
                     left.append({"target": tid[:12], "owner": match, "why": "the human is working in it"})
                 closed += kids.get("children_closed") or []
                 left += kids.get("children_left_open") or []

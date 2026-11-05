@@ -201,3 +201,15 @@ def test_bb_close_leaves_a_lease_tab_the_human_is_working_in(stack):
     _, u = unshow(stack, "busy")
     assert u["closed"] == []
     assert l["target_id"] in stack.fake.targets
+
+
+def test_bb_close_never_closes_his_own_tab_adopted_by_a_lease(stack):
+    # Reviewer case 11/05: bb-show on a page he already had open, then a lease
+    # on it adopts his tab under the agent's owner; bb-close must leave it.
+    his = stack.fake.add_human_tab(url="https://shop.example/orders")
+    _, r = show(stack, owner="adopt", url="https://shop.example/orders")
+    assert r["target_id"] == his
+    _, l = lease(stack, owner="adopt", url="https://shop.example/orders")
+    assert l["target_id"] == his and l["shared_with_shown_job"] is True
+    unshow(stack, "adopt")
+    assert his in stack.fake.targets
