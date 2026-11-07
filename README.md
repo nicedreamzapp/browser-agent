@@ -185,6 +185,16 @@ Every rule has its own tests on both sides: [`tests/test_five_rules.py`](tests/t
 
 One honest limit: a captcha inside a cross-site frame keeps its clicks to itself, so the broker counts the human's focus moving into that frame as activity rather than each click inside it.
 
+### Agent rules
+
+Learned the hard way on 2026-11-07 (clicks hung for minutes in a hidden tab, two jobs opened the same site twice, and the human was told to press buttons his screen did not have). Every agent that drives a tab follows these:
+
+- **Screenshot, act in one tab, screenshot again.** Look before the step, do it in the one tab you hold, look after. `click_exact()` and `click_trusted()` do both screenshots for you.
+- **About 8 seconds per step, then ask.** Every CDP step in `broker_client` gives up after `BB_STEP_TIMEOUT` seconds (default 8). A click that hangs or gets no reaction raises `StuckAskHuman` with a screenshot and the visible buttons: ask the human in one line, do not retry.
+- **One tab per site.** `lease()` on a site an agent tab already has hands you that tab (`tab.reused_tab_of`) instead of opening a second. A tab the human is working in is never handed over or closed; you get `HumanIsWorking`, which means ask him.
+- **Quote only `visible_labels`.** Before telling the human what to click, take a fresh screenshot and run `bb-labels <owner>` (or `tab.visible_labels()`). Name only words from that list, exactly as written.
+- **Destructive actions list what they touch first.** Before deleting, restoring, overwriting or sending, print exactly what will be affected, with a count, and only then do it.
+
 ### Install
 
 #### macOS
@@ -590,11 +600,12 @@ Not yet built: a lane router that skips the browser entirely when a job is reall
 Designed and written by Matt Macosko:
 
 - [`proxy.py`](broker/proxy.py): the transparent CDP proxy on :9222. Filters `Target.*` calls and events down to the caller's own tabs, swallows focus-stealing commands, ties tab ownership to the client connection, and serves the REST lease API and the stage on :9223. This is what the installer runs.
-- [`broker_client.py`](broker/broker_client.py): the Python client. `lease()` context manager with auto-renew and release-on-exit, plus `show()`, `unshow()` and `stage()`.
+- [`broker_client.py`](broker/broker_client.py): the Python client. `lease()` context manager with auto-renew and release-on-exit, a hard per-step timeout, `click_exact()` and `visible_labels()`, plus `show()`, `unshow()` and `stage()`.
 - [`bb-show`](broker/bb-show): the shell command agents use to ask for the screen instead of `open -a`.
 - [`bb-close`](broker/bb-close): closes what `bb-show` put up once the task is done (by owner or URL substring).
 - [`bb-peek`](broker/bb-peek): reads a tab's state (URL, title, text, filled fields, whether the human is in it) without showing anything.
 - [`bb-click`](broker/bb-click): clicks like a person in a tab you hold, hidden or shown: screenshot, find the button, trusted mouse click at its center, screenshot again, and report what changed. `--check` says when a hidden tab is stuck (blank, 401/403, signed out); `--visible` redoes the step in a shown tab, only when the human said take over or has been idle 10+ minutes.
+- [`bb-labels`](broker/bb-labels): a fresh screenshot plus the exact button, link and tab texts visible in a tab you hold. The only words an agent may quote to the human.
 - [`hooks-example-focus-guard.py`](broker/hooks-example-focus-guard.py): an example Claude Code `PreToolUse` hook that redirects `open -a <browser>` and AppleScript `activate` to `bb-show`.
 - [`broker.py`](broker/broker.py): the first version, a standalone lease broker with `/adopt`. Kept for reference; the installer does not run it.
 - [`get.sh`](broker/get.sh), [`install.sh`](broker/install.sh), [`launch-browser.sh`](broker/launch-browser.sh), [`launchd/com.browser-broker.plist`](broker/launchd/com.browser-broker.plist): the macOS one-line installer, browser launcher and LaunchAgent.

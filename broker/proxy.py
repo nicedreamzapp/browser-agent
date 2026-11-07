@@ -279,7 +279,7 @@ class Registry:
                           "created": time.time(), "attached": 0,
                           "expires": time.time() + (ttl or UNATTACHED_TTL),
                           "lease_id": uuid.uuid4().hex[:12] if kind == "rest" else None,
-                          "listed_until": 0}
+                          "listed_until": 0, "url": url or ""}
         self._save()
         HUMANS.watch(tid)
         log(f"tab {tid[:12]} -> {owner} ({kind}{', hidden' if hidden else ''})")
@@ -299,6 +299,63 @@ class Registry:
 
     def owned_by(self, owner):
         return [t for t, i in self.tabs.items() if i["owner"] == owner]
+
+    # ---- one agent tab per site (2026-11-07) ---------------------------------
+    # Two jobs on one site restore ("nd-restore-login", then "nd-restore") each got
+    # a hpanel.hostinger.com tab, and Matt saw the site twice in his tab strip. A
+    # lease on a site that an agent's lease tab already shows now gets that tab:
+    # same tab, fresh lease id. Never a second agent tab on one site.
+    async def site_tab(self, url):
+        """The REST lease tab already open on the site of `url`: (tid, its url now), or None."""
+        try:
+            if not urlparse(url or "").hostname:
+                return None
+        except ValueError:
+            return None
+        ours = [t for t, i in self.tabs.items() if i["kind"] == "rest"]
+        if not ours:
+            return None
+        live = {t["targetId"]: t.get("url", "")
+                for t in (await self.up.send("Target.getTargets")).get("targetInfos", [])}
+        for tid in ours:
+            if tid in live and site_of(live[tid] or self.tabs[tid].get("url")) == site_of(url):
+                return tid, live[tid]
+        return None
+
+    def hand_over(self, tid, owner, ttl):
+        """Share open lease tab `tid` with a new lease. Every lease on it keeps working
+        (renew and release by its own id) and the tab closes when the last one is
+        released or lapses. `created` is kept, so input the human made under the
+        earlier lease still makes the tab his."""
+        i = self.tabs[tid]
+        old, now = i["owner"], time.time()
+        held = i.setdefault("holders", {})
+        held.setdefault(i["lease_id"], {"owner": old, "expires": i["expires"]})
+        lid = uuid.uuid4().hex[:12]
+        held[lid] = {"owner": owner, "expires": now + ttl}
+        i.update(owner=owner, lease_id=lid, expires=max(i["expires"], now + ttl), attached=1)
+        self._save()
+        log(f"tab {tid[:12]} -> {owner} (shares the {old} tab on the same site, no second tab opened)")
+        return old
+
+    def holds(self, i, lid):
+        """True when lease `lid` holds tab entry `i` (its own lease, or one sharing it)."""
+        return bool(lid) and (i.get("lease_id") == lid or lid in (i.get("holders") or {}))
+
+    def let_go(self, i, lid):
+        """Drop lease `lid` from a shared tab. True when another live lease still holds it
+        (the tab stays open and passes to that lease), False when this was the last."""
+        held = i.get("holders") or {}
+        held.pop(lid, None)
+        now = time.time()
+        live = {k: v for k, v in held.items() if v["expires"] > now}
+        if not live:
+            return False
+        if i["lease_id"] not in live:
+            nxt = max(live, key=lambda k: live[k]["expires"])
+            i.update(lease_id=nxt, owner=live[nxt]["owner"])
+        i["expires"] = max(v["expires"] for v in live.values())
+        return True
 
     # ---- child tabs (2026-10-29) ---------------------------------------------
     # A DevHunt listing tab stayed open in Matt's browser after an agent reported
@@ -952,6 +1009,13 @@ class Stage:
         job = self.jobs.get(owner)
         if job and self.tabs.get(owner) and job["site"] == site_of(url):
             return self.tabs[owner]
+        return None
+
+    def site_job_tab(self, url):
+        """The tab of any open job on the site of `url`, or None (one agent tab per site)."""
+        for o, job in self.jobs.items():
+            if self.tabs.get(o) and job["site"] == site_of(url):
+                return self.tabs[o]
         return None
 
     # ---- rule 5: churn -------------------------------------------------------
@@ -1847,13 +1911,28 @@ class ApiHandler(BaseHTTPRequestHandler):
                 # Rule 1: a job that is already on screen for this owner and site
                 # is leased as it is. A hidden second copy is what agents used to
                 # fill in while the human was looking at (and typing in) the first.
-                shared = STAGE.job_tab(owner, b["url"]) if b.get("url") else None
+                # 2026-11-07: any job's tab on that site counts, not only this owner's.
+                url = b.get("url")
+                shared = (STAGE.job_tab(owner, url) or STAGE.site_job_tab(url)) if url else None
+                reused = None
                 if shared and shared not in REG.tabs:
                     tid = self._run(REG.adopt(shared, owner, ttl))
                 else:
                     shared = None
-                    tid = self._run(REG.create(owner, b.get("url"), hidden=bool(b.get("hidden", True)),
-                                               kind="rest", ttl=ttl))
+                    same = self._run(REG.site_tab(url)) if url else None
+                    if same:
+                        tid, now = same
+                        if HUMANS.active(tid):
+                            return self._reply(423, {
+                                "error": str(HumanBusy(tid, HUMANS.seconds_ago(tid), "handed to another job"))
+                                + " One tab per site, so no second tab was opened: ask the human in one line.",
+                                "human_active": True, "seconds_ago": round(HUMANS.seconds_ago(tid), 1)})
+                        reused = REG.hand_over(tid, owner, ttl)
+                        if not REG.tabs[tid].get("shared") and page_key(now) != page_key(url):
+                            self._run(STAGE._navigate(tid, url))
+                    else:
+                        tid = self._run(REG.create(owner, url, hidden=bool(b.get("hidden", True)),
+                                                   kind="rest", ttl=ttl))
                 i = REG.tabs[tid]
                 i["attached"] = 1          # a REST lease counts as held from grant
                 i["purpose"] = b.get("purpose")
@@ -1865,22 +1944,30 @@ class ApiHandler(BaseHTTPRequestHandler):
                             kind="rest", tab=tid)
                 return self._reply(200, {"lease_id": i["lease_id"], "target_id": tid,
                                          "ws_url": f"ws://127.0.0.1:{LISTEN}/devtools/page/{tid}",
-                                         "expires_in": ttl, "shared_with_shown_job": bool(shared)})
+                                         "expires_in": ttl, "shared_with_shown_job": bool(shared),
+                                         "reused_tab_of": reused})
             if self.path.startswith("/renew"):
                 # Pool and browser-client tabs carry lease_id None: a body with no
                 # lease_id must not match them.
                 if not b.get("lease_id"):
                     return self._reply(400, {"error": "lease_id is required"})
                 for tid, i in list(REG.tabs.items()):
-                    if i.get("lease_id") == b.get("lease_id"):
-                        i["expires"] = time.time() + int(b.get("ttl", DEFAULT_TTL))
+                    if REG.holds(i, b.get("lease_id")):
+                        until = time.time() + int(b.get("ttl", DEFAULT_TTL))
+                        if b["lease_id"] in (i.get("holders") or {}):
+                            i["holders"][b["lease_id"]]["expires"] = until
+                            until = max(until, i["expires"])
+                        i["expires"] = until
                         return self._reply(200, {"lease_id": b["lease_id"], "expires_in": int(b.get("ttl", DEFAULT_TTL))})
                 return self._reply(404, {"error": "unknown lease"})
             if self.path.startswith("/release"):
                 if not b.get("lease_id"):
                     return self._reply(400, {"error": "lease_id is required"})
                 for tid, i in list(REG.tabs.items()):
-                    if i.get("lease_id") == b.get("lease_id"):
+                    if REG.holds(i, b.get("lease_id")):
+                        if REG.let_go(i, b["lease_id"]):
+                            return self._reply(200, {"released": b["lease_id"], "tab_closed": False,
+                                                     "left_open": f"{i['owner']} still holds it (same site)"})
                         if REC is not None and (b.get("outcome") or b.get("task")):
                             REC.outcome(b["lease_id"], b.get("outcome"), b.get("task"), b.get("note"))
                         kids = {}

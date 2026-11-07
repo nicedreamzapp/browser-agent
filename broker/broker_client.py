@@ -19,12 +19,18 @@ from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 from urllib.parse import urlencode
 
-from websocket import create_connection
+from websocket import create_connection, WebSocketTimeoutException
 
-import os
+import os, socket
 BROKER = os.environ.get("BROKER_URL", "http://127.0.0.1:9223")
 RENEW_EVERY = 60
 TTL = 300
+# 2026-11-07: clicks in a hidden tab hung for minutes (Chrome holds input replies for
+# a background tab) while the caller's own ssh call timed out around them. Every CDP
+# step now has a hard deadline; past it the step raises instead of waiting on.
+STEP_TIMEOUT = float(os.environ.get("BB_STEP_TIMEOUT", 8))
+ASK = (" Do not retry or loop: ask Matt in one line what to do, quoting only the buttons"
+       " visible_labels() returns after a fresh screenshot.")
 
 
 def _post(path, payload):
@@ -39,24 +45,63 @@ def status():
         return json.load(r)
 
 
+class StepTimeout(TimeoutError):
+    """One CDP step got no answer within the step timeout (STEP_TIMEOUT, BB_STEP_TIMEOUT)."""
+
+
+class StuckAskHuman(RuntimeError):
+    """A click got no reaction in time. Do not retry: ask Matt in one line.
+
+    `shot` is a screenshot of the tab right now (or None if even that hung), `labels`
+    the exact clickable texts visible in it: quote only those words to him."""
+
+    def __init__(self, why, shot=None, labels=None, url=None):
+        self.why, self.shot, self.labels, self.url = why, shot, labels or [], url
+        super().__init__(f"stuck: {why}. Screenshot: {shot or '(none, the tab did not answer)'}. "
+                         f"Visible buttons: {self.labels or '(could not read)'}." + ASK)
+
+
 class Tab:
     """A leased page. Same shape as cdp.Tab so agents port over easily."""
 
-    def __init__(self, ws_url):
-        self.ws = create_connection(ws_url, suppress_origin=True, timeout=30)
+    def __init__(self, ws_url, step_timeout=None):
+        self.step_timeout = float(step_timeout or STEP_TIMEOUT)
+        self.ws = create_connection(ws_url, suppress_origin=True, timeout=max(30, self.step_timeout))
         self._id = 0
         self.target_id = ws_url.rstrip("/").rsplit("/", 1)[-1]
         self.events = collections.deque(maxlen=500)   # CDP events that arrived between replies
+        self.owner = None       # set by lease(); the visible retry needs it
 
-    def send(self, method, **params):
+    def send(self, method, _timeout=None, **params):
+        """One CDP command. Raises StepTimeout when no answer comes within `_timeout`
+        seconds (default the tab's step timeout). A late answer is dropped by id later."""
         self._id += 1
         mid = self._id
+        limit = _timeout or getattr(self, "step_timeout", STEP_TIMEOUT)
+        end = time.time() + limit
         self.ws.send(json.dumps({"id": mid, "method": method, "params": params}))
         while True:
-            msg = json.loads(self.ws.recv())
+            left = end - time.time()
+            if left <= 0:
+                raise StepTimeout(f"{method} got no answer from the browser in {limit:.0f}s")
+            if hasattr(self.ws, "settimeout"):
+                self.ws.settimeout(left)
+            try:
+                raw = self.ws.recv()
+            except (WebSocketTimeoutException, socket.timeout):
+                raise StepTimeout(f"{method} got no answer from the browser in {limit:.0f}s") from None
+            if not raw:             # some websocket-client versions return "" on a timeout
+                if getattr(self.ws, "connected", True) is False:
+                    raise ConnectionError(f"the tab's socket closed while waiting for {method}")
+                continue
+            msg = json.loads(raw)
             if msg.get("id") == mid:
                 if "error" in msg:
-                    raise RuntimeError(msg["error"].get("message"))
+                    err = msg["error"].get("message") or ""
+                    if "human is working in this tab" in err:
+                        # Leave the broker's guard alone; just make the next move obvious.
+                        raise HumanIsWorking(err + ASK)
+                    raise RuntimeError(err)
                 return msg.get("result", {})
             if "method" in msg and hasattr(self, "events"):
                 self.events.append(msg)
@@ -71,7 +116,8 @@ class Tab:
 
     def screenshot(self, path=None):
         """PNG of what the tab shows now (works hidden). Saved to `path` when given; returns the path or bytes."""
-        png = base64.b64decode(self.send("Page.captureScreenshot", format="png")["data"])
+        png = base64.b64decode(self.send("Page.captureScreenshot", _timeout=max(15, self.step_timeout),
+                                         format="png")["data"])
         if path:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "wb") as f:
@@ -90,6 +136,8 @@ class Tab:
         signed-in / signed-out signals, HTTP status of the page itself, mutation count."""
         try:
             return json.loads(self.eval(_STATE_JS) or "{}")
+        except StepTimeout:
+            raise                   # a hung tab is not "the page moved"
         except Exception as e:      # mid-navigation: the old document is gone
             return {"error": str(e)}
 
@@ -100,8 +148,9 @@ class Tab:
         except Exception:
             return {}
 
-    def mouse_click(self, x, y):
-        """A trusted left click at viewport CSS pixels (x, y). No focus change, no bringToFront."""
+    def mouse_click(self, x, y, timeout=None):
+        """A trusted left click at viewport CSS pixels (x, y). No focus change, no bringToFront.
+        Raises StepTimeout when press or release gets no answer within `timeout` s."""
         # In a hidden tab Chrome holds the reply to mouseMoved ~5 s (it waits for a frame that a
         # background tab paints late). The move still lands in order, so send it without waiting.
         self._id += 1
@@ -109,7 +158,8 @@ class Tab:
                                  "params": {"type": "mouseMoved", "x": x, "y": y, "button": "none"}}))
         time.sleep(0.05)
         for kind, buttons in (("mousePressed", 1), ("mouseReleased", 0)):
-            self.send("Input.dispatchMouseEvent", type=kind, x=x, y=y, button="left", buttons=buttons, clickCount=1)
+            self.send("Input.dispatchMouseEvent", _timeout=timeout, type=kind, x=x, y=y, button="left",
+                      buttons=buttons, clickCount=1)
             time.sleep(0.05)
 
     def wake(self):
@@ -120,6 +170,8 @@ class Tab:
                                ("Network.enable", {})):
             try:
                 self.send(method, **params)
+            except StepTimeout:
+                raise
             except Exception:
                 pass
 
@@ -148,6 +200,8 @@ class Tab:
             st, kids = self.state(), self._children()
         try:
             self.send("Runtime.evaluate", expression="1")     # pulls in the network events that arrived
+        except StepTimeout:
+            raise
         except Exception:
             pass
         errors = []
@@ -178,20 +232,91 @@ class Tab:
     def click_trusted(self, target, wait=3.0, shots=True, label="click"):
         """Screenshot, find `target` (text / selector, or an (x, y) tuple), trusted mouse click
         at its center, wait, screenshot again. Returns what changed (url, title, DOM, new tabs,
-        HTTP errors, stuck verdict) plus the two screenshot paths."""
-        before = self._before(shots, label)
-        if isinstance(target, (tuple, list)):
-            x, y = float(target[0]), float(target[1])
-            el = {"x": x, "y": y, "tag": "(point)", "text": ""}
-        else:
-            el = self.find(target)
-            if not el:
-                raise LookupError(f"nothing visible on the page matches {target!r}")
-            x, y = el["x"], el["y"]
-        self.mouse_click(x, y)
-        out = self._after(before, wait, shots, label)
+        HTTP errors, stuck verdict) plus the two screenshot paths. Raises StuckAskHuman when
+        the browser stops answering mid-click (a hidden tab holding input)."""
+        try:
+            before = self._before(shots, label)
+            if isinstance(target, (tuple, list)):
+                x, y = float(target[0]), float(target[1])
+                el = {"x": x, "y": y, "tag": "(point)", "text": ""}
+            else:
+                el = self.find(target)
+                if not el:
+                    raise LookupError(f"nothing visible on the page matches {target!r}. "
+                                      f"Visible buttons: {self.visible_labels()}")
+                x, y = el["x"], el["y"]
+            self.mouse_click(x, y)
+            out = self._after(before, wait, shots, label)
+        except StepTimeout as e:
+            raise self._stuck(f"clicking {target!r} hung: {e}", label) from None
         out.update({"how": "trusted", "x": round(x), "y": round(y), "element": el})
         return out
+
+    # ---- exact labels (2026-11-07) ---------------------------------------------
+    # click_trusted("View backups") said "nothing visible matches" with the words on
+    # screen, and Matt was told to press buttons his screen did not have. What worked
+    # by hand: the exact text, scrolled into view, a trusted click at its centre.
+
+    def visible_labels(self):
+        """The exact clickable texts (buttons, links, tabs) visible in the viewport now,
+        top to bottom. These are the only words an agent may quote to Matt, and only
+        after a fresh screenshot."""
+        return json.loads(self.eval(_LABELS_JS) or "[]")
+
+    def click_exact(self, label, wait=None, shots=True, visible=False, matt_ok=False):
+        """Trusted click on the visible button, link, role=button or role=tab whose trimmed
+        text is exactly `label`. Screenshot before and after; returns what changed, like
+        click_trusted. No reaction within `wait` s (default the step timeout) raises
+        StuckAskHuman. With visible=True, retry once in a visible tab via show() first
+        (only with matt_ok=True or the human idle 10+ min, as bb-click --visible)."""
+        wait = self.step_timeout if wait is None else wait
+        name = "exact-" + label
+        try:
+            before = self._before(shots, name)
+            el = json.loads(self.eval(_EXACT_JS % json.dumps(str(label))) or "null")
+            if not el:
+                raise LookupError(f"no visible button, link or tab reads exactly {label!r}. "
+                                  f"Visible buttons: {self.visible_labels()}")
+            self.mouse_click(el["x"], el["y"])
+            out = self._after(before, wait, shots, name)
+        except StepTimeout as e:
+            why = f"clicking {label!r} hung: {e}"
+        else:
+            out.update({"how": "exact", "x": round(el["x"]), "y": round(el["y"]), "element": el})
+            if out["changed"]:
+                return out
+            why = f"clicked {label!r} and the page did not react in {wait:.0f}s"
+        if visible:
+            return self._visible_retry(label, why, wait, matt_ok)
+        raise self._stuck(why, name)
+
+    def _visible_retry(self, label, why, wait, matt_ok):
+        idle = human_idle_seconds()
+        if not self.owner or not (matt_ok or (idle is not None and idle >= 600)):
+            raise self._stuck(why + " (no visible retry: the human did not say take over)", "exact-" + label)
+        url = self.state().get("url")
+        vowner = self.owner + "-visible"
+        show(url, owner=vowner, purpose="visible redo of a stuck hidden click")
+        _log(f"{why}; retrying once in a visible tab ({vowner})")
+        with lease(vowner, url=url, purpose="visible redo", step_timeout=self.step_timeout) as v:
+            out = v.click_exact(label, wait=wait)
+        out["visible_owner"] = vowner          # close it when done: unshow(vowner) / bb-close
+        return out
+
+    def _stuck(self, why, label):
+        """A StuckAskHuman with a screenshot and the visible labels, each best effort."""
+        shot = labels = url = None
+        try:
+            shot = self.screenshot(_shot_path(label, "stuck"))
+        except Exception:
+            pass
+        try:
+            labels = self.visible_labels()
+            url = self.state().get("url")
+        except Exception:
+            pass
+        _log(f"stuck, asking the human: {why} at {url}")
+        return StuckAskHuman(why, shot, labels, url)
 
     def click(self, target, wait=3.0, shots=False, label="click"):
         """Script click first (element.click()); if the page does not react within `wait`
@@ -241,8 +366,8 @@ class Tab:
         self.send("Page.navigate", url=url)
         time.sleep(wait)
 
-    def eval(self, expr):
-        r = self.send("Runtime.evaluate", expression=expr, returnByValue=True,
+    def eval(self, expr, timeout=None):
+        r = self.send("Runtime.evaluate", _timeout=timeout, expression=expr, returnByValue=True,
                       awaitPromise=True)
         return r.get("result", {}).get("value")
 
@@ -253,10 +378,27 @@ class Tab:
             pass
 
 
+def visible_labels(tab):
+    """The exact clickable texts visible in `tab` now. Quote only these to Matt."""
+    return tab.visible_labels()
+
+
 @contextmanager
-def lease(owner, url=None, purpose=None, hidden=True, ttl=TTL):
-    g = _post("/lease", {"owner": owner, "url": url, "purpose": purpose,
-                         "hidden": hidden, "ttl": ttl})
+def lease(owner, url=None, purpose=None, hidden=True, ttl=TTL, step_timeout=None):
+    """Hold a tab for one job. One agent tab per site: when an agent's tab on that site is
+    already open the broker hands you that tab (tab.reused_tab_of says whose) instead of
+    a second one. Every CDP step is capped at `step_timeout` s (default STEP_TIMEOUT).
+    Raises HumanIsWorking when the human is in that tab: ask him, do not loop."""
+    try:
+        g = _post("/lease", {"owner": owner, "url": url, "purpose": purpose,
+                             "hidden": hidden, "ttl": ttl})
+    except HTTPError as e:
+        if e.code not in (423, 429):
+            raise
+        d = json.loads(e.read() or b"{}")
+        if e.code == 423:
+            raise HumanIsWorking(d.get("error", "the human is working in that tab") + ASK, d.get("page")) from None
+        raise StopAndAsk(d.get("error", "stop and ask the human")) from None
     stop = threading.Event()
 
     def keepalive():
@@ -279,7 +421,8 @@ def lease(owner, url=None, purpose=None, hidden=True, ttl=TTL):
     threading.Thread(target=keepalive, daemon=True).start()
     tab = None
     try:
-        tab = Tab(g["ws_url"])
+        tab = Tab(g["ws_url"], step_timeout=step_timeout) if step_timeout else Tab(g["ws_url"])
+        tab.owner, tab.reused_tab_of = owner, g.get("reused_tab_of")
         yield tab
     finally:
         stop.set()
@@ -404,6 +547,44 @@ _FIND_JS = "(() => {" + _FIND_CORE + r"""
 _JS_CLICK = "(() => {" + _FIND_CORE + r"""
   if (!el) return false;
   el.scrollIntoView({block: 'center'}); el.click(); return true;
+})()"""
+# Labels as the person sees them: visible, inside the viewport, not covered at their
+# centre, and the trimmed text exactly as rendered (an input button's value).
+_LABEL_CORE = r"""
+  const vis = (el) => { const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+    return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none' && +cs.opacity !== 0; };
+  const inView = (el) => { const r = el.getBoundingClientRect();
+    if (r.bottom <= 0 || r.right <= 0 || r.top >= innerHeight || r.left >= innerWidth) return false;
+    const x = Math.min(Math.max(r.left + r.width / 2, 0), innerWidth - 1), y = Math.min(Math.max(r.top + r.height / 2, 0), innerHeight - 1);
+    const top = document.elementFromPoint(x, y);
+    return !top || top === el || el.contains(top) || top.contains(el); };
+  const text = (el) => ((el.tagName === 'INPUT' ? el.value : el.innerText) || '').trim();
+"""
+_LABELS_JS = "(() => {" + _LABEL_CORE + r"""
+  const sel = 'button,a,[role=button],[role=link],[role=tab],[role=menuitem],input[type=submit],input[type=button],summary';
+  const els = [...document.querySelectorAll(sel)].filter(e => vis(e) && inView(e) && text(e))
+    .sort((a, b) => { const p = a.getBoundingClientRect(), q = b.getBoundingClientRect(); return (p.top - q.top) || (p.left - q.left); });
+  const seen = new Set(), out = [];
+  for (const e of els) { const t = text(e).slice(0, 120); if (!seen.has(t)) { seen.add(t); out.push(t); } }
+  return JSON.stringify(out.slice(0, 80));
+})()"""
+# Exact text first, then the same text with runs of whitespace collapsed (still case
+# sensitive). The innermost match wins (a link wrapping a button with the same words).
+_EXACT_JS = "(() => {" + _LABEL_CORE + r"""
+  const want = %s, squash = (s) => s.replace(/\s+/g, ' ');
+  const sel = 'button,a,[role=button],[role=tab],input[type=submit],input[type=button]';
+  const all = [...document.querySelectorAll(sel)].filter(vis);
+  let hits = all.filter(e => text(e) === want);
+  if (!hits.length) hits = all.filter(e => squash(text(e)) === squash(want));
+  hits = hits.filter(e => !hits.some(o => o !== e && e.contains(o)));
+  if (!hits.length) return null;
+  const el = hits[0];
+  el.scrollIntoView({block: 'center', inline: 'center'});
+  const r = el.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
+  const top = document.elementFromPoint(x, y);
+  const covered = top && top !== el && !el.contains(top) && !top.contains(el) ? top.tagName.toLowerCase() : null;
+  return JSON.stringify({x, y, w: r.width, h: r.height, tag: el.tagName.toLowerCase(), disabled: !!el.disabled,
+                         text: text(el).slice(0, 80), matches: hits.length, covered_by: covered});
 })()"""
 _MUT_JS = r"""(() => { try { if (window.__bbMutObs) window.__bbMutObs.disconnect(); } catch (e) {}
   window.__bbMut = 0;

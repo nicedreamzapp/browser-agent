@@ -223,3 +223,84 @@ def test_click_falls_back_to_trusted_when_js_click_does_nothing(monkeypatch):
     monkeypatch.setattr(t, "_after", lambda *a: {"changed": [], "seconds": 3})
     monkeypatch.setattr(t, "click_trusted", lambda *a, **k: {"changed": ["page changed"], "how": "trusted"})
     assert t.click("Get started")["how"] == "js->trusted"
+
+
+# ---- 2026-11-07: step timeouts, ask-the-human errors, one agent tab per site --------
+class _SilentWS:
+    """A page socket that never answers: what a hidden tab holding input looks like."""
+
+    def __init__(self):
+        self.t = None
+
+    def send(self, raw):
+        pass
+
+    def settimeout(self, t):
+        self.t = t
+
+    def recv(self):
+        import websocket
+        time.sleep(min(self.t or 0, 0.2))
+        raise websocket.WebSocketTimeoutException("timed out")
+
+
+def test_send_gives_up_after_the_step_timeout():
+    t = broker_client.Tab.__new__(broker_client.Tab)
+    t.ws, t._id, t.step_timeout = _SilentWS(), 0, 0.2
+    t0 = time.time()
+    with pytest.raises(broker_client.StepTimeout, match="Input.dispatchMouseEvent"):
+        t.send("Input.dispatchMouseEvent", type="mousePressed")
+    assert time.time() - t0 < 2
+
+
+def test_a_hung_click_raises_stuck_ask_human(monkeypatch):
+    t = broker_client.Tab.__new__(broker_client.Tab)
+    t.ws, t._id, t.step_timeout, t.owner = _SilentWS(), 0, 0.2, "x"
+    t.events = __import__("collections").deque()
+    with pytest.raises(broker_client.StuckAskHuman, match="Do not retry") as e:
+        t.click_exact("More information...", shots=False)
+    assert e.value.shot is None and e.value.labels == []
+
+
+def test_human_guard_error_says_ask_dont_loop():
+    t = broker_client.Tab.__new__(broker_client.Tab)
+
+    class WS:
+        def send(self, raw):
+            self.mid = json.loads(raw)["id"]
+
+        def recv(self):
+            return json.dumps({"id": self.mid, "error": {
+                "message": "the human is working in this tab right now (his last input was 3s ago)"}})
+    t.ws, t._id = WS(), 0
+    with pytest.raises(broker_client.HumanIsWorking, match="ask Matt in one line"):
+        t.send("Input.dispatchMouseEvent")
+
+
+def test_second_lease_on_a_site_reuses_the_agent_tab(client):
+    with broker_client.lease("nd-restore-login", url="https://hpanel.example/login") as a:
+        (tid,) = list(client.reg.tabs)
+        with broker_client.lease("nd-restore", url="https://hpanel.example/backups") as b:
+            assert list(client.reg.tabs) == [tid]           # no second tab
+            assert b.target_id == tid and b.reused_tab_of == "nd-restore-login"
+            assert client.reg.tabs[tid]["owner"] == "nd-restore"
+        # the second job is done; the first still holds the tab, so it stays open
+        assert tid in client.fake.targets and client.reg.tabs[tid]["owner"] == "nd-restore-login"
+        assert a.eval("1") is not None
+    assert client.wait_for(lambda: tid not in client.fake.targets)
+    assert client.reg.tabs == {}
+
+
+def test_shared_tab_closes_after_both_jobs_release(client):
+    with broker_client.lease("one", url="https://site.example/a"):
+        (tid,) = list(client.reg.tabs)
+        with broker_client.lease("two", url="https://site.example/b"):
+            pass
+        assert tid in client.fake.targets
+    assert client.wait_for(lambda: tid not in client.fake.targets)
+
+
+def test_lease_on_another_site_gets_its_own_tab(client):
+    with broker_client.lease("a", url="https://one.example/x"):
+        with broker_client.lease("b", url="https://two.example/y"):
+            assert len(client.reg.tabs) == 2

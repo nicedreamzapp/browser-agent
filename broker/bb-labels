@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""bb-labels: the exact button, link and tab texts visible in a tab you hold, right now.
+
+Matt (2026-11-07), after an agent told him to click buttons his screen did not have:
+quote only what is actually there. This takes a fresh screenshot of the tab and prints
+the clickable texts inside its viewport, top to bottom, exactly as they read. These
+are the only words an agent may put in front of him ("click View backups"), and only
+from a run made just before asking. Read only: nothing is clicked or focused.
+
+    bb-labels <owner>
+
+Exit 0 printed labels · 3 no such tab · 1 error / broker down.
+"""
+import os, sys
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+import broker_client as bc  # noqa: E402
+
+_loader = SourceFileLoader("bb_click", os.path.join(HERE, "bb-click"))
+bbclick = module_from_spec(spec_from_loader("bb_click", _loader))
+_loader.exec_module(bbclick)     # find_tab / Attached: the same way bb-click gets onto a tab
+
+
+def main(argv):
+    if len(argv) != 1:
+        print(__doc__.split("\n\n")[2], file=sys.stderr)
+        return 1
+    owner = argv[0]
+    try:
+        info = bbclick.find_tab(owner)
+    except Exception as e:
+        print(f"broker not answering: {e}", file=sys.stderr)
+        return 1
+    if not info:
+        print(f"no open tab belongs to {owner}. Lease or bb-show it first.", file=sys.stderr)
+        return 3
+    a = bbclick.Attached(owner, info)
+    try:
+        shot = a.tab.screenshot(bc._shot_path(owner, "labels"))
+        labels = a.tab.visible_labels()
+    except bc.StepTimeout as e:
+        print(f"the tab did not answer ({e}). Ask Matt in one line instead of guessing.", file=sys.stderr)
+        return 1
+    finally:
+        a.close()
+    print(f"screenshot: {shot}")
+    print(f"url:        {info.get('url', '')}")
+    for t in labels:
+        print(f"  {t}")
+    if not labels:
+        print("  (no clickable text visible)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
