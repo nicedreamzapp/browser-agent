@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""bb-form: read or fill a whole form page in one step, in a tab you already hold.
+
+Matt (2026-11-06, watching an agent crawl through a job application one field and
+one screenshot at a time): "make it faster at filling them in, fix the bottle neck."
+
+    bb-form <owner> dump                 every field on the page as JSON: key, label, type, value, options, required
+    bb-form <owner> fill answers.json    set every field at once ({"<key or label>": value}), then read them back
+    bb-form <owner> fill -               same, answers JSON on stdin
+
+One dump, one fill, one bb-click on Next. Keys come from the dump (#id, [name=..]);
+a label works too (case-insensitive substring match). Values: text for inputs and
+textareas, option text or value for selects, true/false for checkboxes, the option
+label or value for a radio group. Values are set through the native setters with
+input/change/blur events, so React, Angular and Vue forms register them.
+Same-origin iframes are included (keys start with "frameN>").
+Custom widgets (div dropdowns, file pickers) still need bb-click / the chooser intercept.
+
+Exit 0 all set and read back · 2 some fields did not take (listed) · 3 no such tab ·
+4 the human is working in that tab · 1 error.
+"""
+import importlib.machinery, importlib.util, json, os, sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+_ld = importlib.machinery.SourceFileLoader("bb_click", os.path.join(HERE, "bb-click"))
+_spec = importlib.util.spec_from_loader("bb_click", _ld)
+bbc = importlib.util.module_from_spec(_spec)
+_ld.exec_module(bbc)
+
+JS_COMMON = r"""
+const docs = () => { const out = [[ '', document ]];
+  [...document.querySelectorAll('iframe')].forEach((f, i) => { try { if (f.contentDocument) out.push(['frame' + i + '>', f.contentDocument]); } catch (e) {} });
+  return out; };
+const vis = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+  return (r.width > 0 || r.height > 0) && s.visibility !== 'hidden' && s.display !== 'none'; };
+const txt = s => (s || '').replace(/\s+/g, ' ').trim();
+const labelOf = (el, d) => {
+  if (el.id) { const l = d.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l) return txt(l.innerText); }
+  const fs0 = el.closest('fieldset'); const lg0 = fs0 && fs0.querySelector('legend');
+  if (el.type === 'radio' && lg0) return txt(lg0.innerText);
+  const wrap = el.closest('label'); if (wrap) return txt(wrap.innerText);
+  if (el.getAttribute('aria-label')) return txt(el.getAttribute('aria-label'));
+  const lb = el.getAttribute('aria-labelledby');
+  if (lb) return txt(lb.split(' ').map(i => (d.getElementById(i) || {}).innerText || '').join(' '));
+  const fs = el.closest('fieldset'); const lg = fs && fs.querySelector('legend');
+  if (el.type === 'radio' && lg) return txt(lg.innerText);
+  if (el.placeholder) return txt(el.placeholder);
+  const prev = el.previousElementSibling; if (prev && !prev.matches('input,select,textarea') && txt(prev.innerText)) return txt(prev.innerText);
+  let p = el.parentElement;
+  for (let i = 0; p && i < 4; i++, p = p.parentElement) { const t = txt(p.innerText); if (t && t.length < 160) return t; }
+  return el.name || '';
+};
+const keyOf = (el, d) => {
+  if (el.type === 'radio' && el.name) return '[name="' + el.name + '"]';
+  if (el.id && d.querySelectorAll('#' + CSS.escape(el.id)).length === 1) return '#' + el.id;
+  if (el.name && d.querySelectorAll('[name="' + CSS.escape(el.name) + '"]').length === 1) return '[name="' + el.name + '"]';
+  const all = [...d.querySelectorAll('input,select,textarea')]; return '@' + all.indexOf(el);
+};
+const fields = () => { const out = []; const seen = new Set();
+  for (const [pre, d] of docs()) {
+    for (const el of d.querySelectorAll('input,select,textarea')) {
+      const t = (el.type || el.tagName).toLowerCase();
+      if (['hidden', 'submit', 'button', 'reset', 'image'].includes(t) || el.disabled) continue;
+      if (!vis(el) && t !== 'file' && t !== 'radio' && t !== 'checkbox') continue;
+      const key = pre + keyOf(el, d); if (seen.has(key)) continue; seen.add(key);
+      const f = { key, label: labelOf(el, d).slice(0, 140), type: t, required: el.required || el.getAttribute('aria-required') === 'true' };
+      if (t === 'select-one' || t === 'select-multiple') { f.options = [...el.options].map(o => txt(o.text)).slice(0, 60); f.value = txt((el.selectedOptions[0] || {}).text); }
+      else if (t === 'radio') { const g = [...d.querySelectorAll('input[type=radio][name="' + CSS.escape(el.name) + '"]')];
+        f.options = g.map(r => { const l = r.id && d.querySelector('label[for="' + CSS.escape(r.id) + '"]'); return txt(l ? l.innerText : (r.closest('label') || {}).innerText) || r.value; });
+        const c = g.find(r => r.checked); f.value = c ? f.options[g.indexOf(c)] : ''; }
+      else if (t === 'checkbox') f.value = el.checked;
+      else if (t === 'file') f.value = el.files && el.files.length ? el.files[0].name : '';
+      else f.value = el.value;
+      f._el = el; f._doc = d; out.push(f);
+    } }
+  return out; };
+"""
+
+JS_DUMP = "(() => {" + JS_COMMON + "return JSON.stringify(fields().map(({_el, _doc, ...f}) => f)); })()"
+
+JS_FILL = "(() => {" + JS_COMMON + r"""
+const answers = __ANSWERS__; const fs = fields(); const res = [];
+const find = k => { const lk = k.toLowerCase();
+  return fs.find(f => f.key === k) || fs.find(f => f.label.toLowerCase() === lk) || fs.find(f => f.label.toLowerCase().includes(lk)); };
+const fire = el => ['input', 'change', 'blur'].forEach(e => el.dispatchEvent(new Event(e, { bubbles: true })));
+const setVal = (el, v) => { const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : el.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+  el.focus(); Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v); fire(el); };
+for (const [k, v] of Object.entries(answers)) {
+  const f = find(k); if (!f) { res.push({ key: k, ok: false, why: 'no such field' }); continue; }
+  const el = f._el, d = f._doc, want = String(v);
+  try {
+    if (f.type.startsWith('select')) {
+      const o = [...el.options].find(o => txt(o.text) === want || o.value === want) || [...el.options].find(o => txt(o.text).toLowerCase().includes(want.toLowerCase()));
+      if (!o) { res.push({ key: f.key, ok: false, why: 'no option ' + want, options: f.options }); continue; }
+      setVal(el, o.value);
+    } else if (f.type === 'radio') {
+      const g = [...d.querySelectorAll('input[type=radio][name="' + CSS.escape(el.name) + '"]')];
+      const i = f.options.findIndex(o => o === want) >= 0 ? f.options.findIndex(o => o === want) : f.options.findIndex(o => o.toLowerCase().includes(want.toLowerCase()));
+      const r = i >= 0 ? g[i] : g.find(r => r.value === want);
+      if (!r) { res.push({ key: f.key, ok: false, why: 'no option ' + want, options: f.options }); continue; }
+      if (!r.checked) r.click(); fire(r);
+    } else if (f.type === 'checkbox') {
+      const on = v === true || /^(true|yes|1|on)$/i.test(want); if (el.checked !== on) el.click(); fire(el);
+    } else if (f.type === 'file') { res.push({ key: f.key, ok: false, why: 'file inputs need the chooser intercept' }); continue; }
+    else setVal(el, want);
+  } catch (e) { res.push({ key: f.key, ok: false, why: String(e) }); continue; }
+  res.push({ key: f.key, label: f.label, want });
+}
+const now = fields();
+for (const r of res) { if (r.ok === false) continue; const f = now.find(f => f.key === r.key);
+  const got = f ? String(f.value) : '<gone>'; const w = r.want;
+  r.got = got; r.ok = got === w || got.toLowerCase().includes(w.toLowerCase()) || (f && f.type === 'checkbox' && String(/^(true|yes|1|on)$/i.test(w)) === got); delete r.want; }
+const missing = now.filter(f => f.required && (f.value === '' || f.value === false) && !res.some(r => r.key === f.key)).map(f => ({ key: f.key, label: f.label }));
+return JSON.stringify({ results: res, required_still_empty: missing });
+})()
+"""
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] not in ("dump", "fill") or (argv[1] == "fill" and len(argv) < 3):
+        print(__doc__.split("\n\n")[2], file=sys.stderr)
+        return 1
+    owner, cmd = argv[0], argv[1]
+    try:
+        info = bbc.find_tab(owner)
+    except Exception as e:
+        print(f"broker not answering: {e}", file=sys.stderr)
+        return 1
+    if not info:
+        print(f"no open tab belongs to {owner}. Lease or bb-show it first.", file=sys.stderr)
+        return 3
+    if (info.get("human") or {}).get("active"):
+        print("the human is working in that tab right now. Not filling. Re-read it with bb-peek.", file=sys.stderr)
+        return 4
+    a = bbc.Attached(owner, info)
+    try:
+        if cmd == "dump":
+            print(json.dumps(json.loads(a.tab.eval(JS_DUMP)), indent=1))
+            return 0
+        src = sys.stdin.read() if argv[2] == "-" else open(argv[2]).read()
+        out = json.loads(a.tab.eval(JS_FILL.replace("__ANSWERS__", json.dumps(json.loads(src)))))
+    finally:
+        a.close()
+    bad = [r for r in out["results"] if not r.get("ok")]
+    print(f"set {len(out['results']) - len(bad)} of {len(out['results'])} fields")
+    for r in bad:
+        print(f"  NOT SET {r['key']}: {r.get('why') or 'read back ' + repr(r.get('got'))}"
+              + (f" options={r['options']}" if r.get("options") else ""))
+    for m in out["required_still_empty"]:
+        print(f"  required, still empty: {m['key']} ({m['label']})")
+    return 2 if bad or out["required_still_empty"] else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
