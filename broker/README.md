@@ -145,7 +145,7 @@ remember them, and cannot talk its way around them.
 | **2. Look before every step.** | `bb-show` of an open page brings it forward as it is and prints what it shows: URL, title, text, filled-in fields, and whether the human is working in it. `bb-peek` reads the same state without showing anything (passwords and card numbers masked), for any tab, including the human's own. |
 | **3. Notice when the human helps.** | Every tab the broker opens or shows gets a small listener for real keyboard and mouse input (`event.isTrusted`, which page scripts cannot fake). Input the agent itself sends through the broker is recognized and not counted. While the human has been active in the last 20 seconds, agent clicks and keystrokes in that tab are refused, and a refused `bb-show` exits 4 and hands back what he has done so far, so the agent continues from there. |
 | **4. No reloading or closing mid-job.** | A page that is already open is never reloaded unless the caller passes `--reload`, and never while the human is working in it. A tab on screen for an open job cannot be reloaded, re-navigated to the same page or closed through the proxy. A tab the human is working in is never closed by anything: not `bb-close`, not a released or expired lease, not a disconnecting client, not a restarted broker. It is handed to him instead. |
-| **5. Stuck means ask, not retry.** | If the same job opens and closes (or reloads) the same page twice within 10 minutes, the third try is refused with HTTP 429 and `bb-show` exits 5 with one instruction: stop and ask the human in one line what is wrong. |
+| **5. Stuck means ask, not retry.** | If the same job opens and closes (or reloads) the same page twice within 10 minutes, the third try is refused with HTTP 429 and `bb-show` exits 5 with one instruction: stop and ask the human in one line what is wrong. Hidden REST leases follow it too (2026-11-09): the third open of the same site in a quick chain (each within 150 s of the last) gets 429, so a job split over several scripts can't reload a site over and over. Put every step in ONE script and ONE lease; `matt_ok: true` only when the human said to retry. |
 
 What an agent sees:
 
@@ -170,7 +170,7 @@ It was not opened again. Do not retry. Ask the human in one line what is wrong. 
 
 From Python, `broker_client.peek(owner)` returns the same state, `broker_client.human_active(owner)`
 answers yes or no, and `show()` raises `HumanIsWorking` (with `.page`) or `StopAndAsk`.
-`BROKER_HUMAN_QUIET` (20 s), `BROKER_CHURN_WINDOW` (600 s) and `BROKER_CHURN_LIMIT` (2) tune it.
+`BROKER_HUMAN_QUIET` (20 s), `BROKER_CHURN_WINDOW` (600 s) and `BROKER_CHURN_LIMIT` (2) tune it, `BROKER_RETRY_GAP` (150 s) and `BROKER_RETRY_LIMIT` (3) tune the lease version.
 Every rule has its own tests in [`tests/test_five_rules.py`](tests/test_five_rules.py).
 
 One honest limit: a captcha inside a cross-site frame keeps its clicks to itself, so the broker

@@ -384,14 +384,16 @@ def visible_labels(tab):
 
 
 @contextmanager
-def lease(owner, url=None, purpose=None, hidden=True, ttl=TTL, step_timeout=None):
+def lease(owner, url=None, purpose=None, hidden=True, ttl=TTL, step_timeout=None, matt_ok=False):
     """Hold a tab for one job. One agent tab per site: when an agent's tab on that site is
     already open the broker hands you that tab (tab.reused_tab_of says whose) instead of
     a second one. Every CDP step is capped at `step_timeout` s (default STEP_TIMEOUT).
-    Raises HumanIsWorking when the human is in that tab: ask him, do not loop."""
+    Raises HumanIsWorking when the human is in that tab: ask him, do not loop.
+    Raises StopAndAsk on the third quick open of the same site (each within 150 s): put
+    every step in ONE script and ONE lease; matt_ok=True only when Matt said to retry."""
     try:
         g = _post("/lease", {"owner": owner, "url": url, "purpose": purpose,
-                             "hidden": hidden, "ttl": ttl})
+                             "hidden": hidden, "ttl": ttl, "matt_ok": matt_ok})
     except HTTPError as e:
         if e.code not in (423, 429):
             raise

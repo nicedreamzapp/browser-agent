@@ -95,6 +95,29 @@ AGENT_TOUCH = ("Runtime.evaluate", "Runtime.callFunctionOn", "DOM.focus")   # re
 GENUINE = ("pointerdown", "keydown", "paste")   # inputs only a person makes; they always count
 CHURN_WINDOW = int(os.environ.get("BROKER_CHURN_WINDOW", 600))  # seconds an open/close cycle is remembered
 CHURN_LIMIT = int(os.environ.get("BROKER_CHURN_LIMIT", 2))      # cycles allowed before "stop and ask"
+# Rule 5 for REST leases (2026-11-09): a job split over several scripts reloads the
+# site from the top on every run and loses what it typed. Opening the same site again
+# within RETRY_GAP seconds of the last open is a retry; the RETRY_LIMIT-th open in one
+# quick chain is refused (429, stop and ask). Pollers that come back minutes later never chain.
+RETRY_GAP = int(os.environ.get("BROKER_RETRY_GAP", 150))
+RETRY_LIMIT = int(os.environ.get("BROKER_RETRY_LIMIT", 3))
+_RETRIES = {}                       # (owner, site) -> [last open time, opens in this chain]
+_RETRIES_LOCK = threading.Lock()
+
+
+def lease_retry_check(owner, url):
+    """Count this REST lease open; raise StopAndAsk when it is one quick reopen too many."""
+    if not url:
+        return
+    key, now = (owner, site_of(url)), time.time()
+    with _RETRIES_LOCK:
+        last, n = _RETRIES.get(key, (0, 0))
+        n = n + 1 if now - last < RETRY_GAP else 1
+        if n >= RETRY_LIMIT:
+            _RETRIES[key] = (now, n - 1)      # refused opens do not lengthen the chain
+            log(f"lease: refused {owner} reopening {key[1]}: open {n} in a row, each within {RETRY_GAP}s")
+            raise StopAndAsk(owner, key[1], n - 1, max(1, (RETRY_GAP * (n - 1)) // 60))
+        _RETRIES[key] = (now, n)
 PORT_GRACE = 8                     # seconds a restarting proxy waits for the old one to let go
 # The Broker Recorder (2026-10-31): off unless BROKER_RECORD=1 (every job) or a client
 # asks for its own job (POST /lease {"record": true}, or X-Broker-Record: 1 on a CDP
@@ -1913,6 +1936,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                 # fill in while the human was looking at (and typing in) the first.
                 # 2026-11-07: any job's tab on that site counts, not only this owner's.
                 url = b.get("url")
+                if not b.get("matt_ok"):
+                    try:
+                        lease_retry_check(owner, url)
+                    except StopAndAsk as e:
+                        return self._reply(429, {"error": str(e) + " Put every step of the job in ONE script"
+                                                 " and ONE lease so the site loads once.", "stop_and_ask": True})
                 shared = (STAGE.job_tab(owner, url) or STAGE.site_job_tab(url)) if url else None
                 reused = None
                 if shared and shared not in REG.tabs:
