@@ -142,6 +142,7 @@ class Stack:
                        ("UPSTREAM", "LISTEN", "LOG", "STATE", "REG", "UP", "STAGE", "INNER_PORT",
                         "STAGE_ACTIVATE_APP", "HUMANS", "REC")}
         proxy.HUMANS = proxy.Humans()       # no human activity carried over between tests
+        proxy._RETRIES.clear()              # no quick-reopen chain carried over between tests
         # Never bring a real window forward from a test run.
         proxy.STAGE_ACTIVATE_APP = False
         proxy.UPSTREAM = self.fake.port

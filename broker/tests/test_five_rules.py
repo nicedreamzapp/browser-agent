@@ -567,3 +567,29 @@ def test_long_polling_job_does_not_turn_its_own_typing_into_his(monkeypatch):
         h2.agent_touch("T", now + 4 + i * 0.8)
     h2.merge("T", [[now + 0.01, "input"]])
     assert h2.touched_since("T", now - 1) is False
+
+
+def test_rule5_a_third_quick_lease_of_the_same_site_is_refused(stack):
+    url = "https://portal.example/form"
+    for _ in range(2):
+        code, l = lease(stack, owner="wizard", url=url)
+        assert code == 200
+        release(stack, l["lease_id"])
+    code, e = lease(stack, owner="wizard", url=url)
+    assert code == 429 and e["stop_and_ask"] is True and "ONE script" in e["error"]
+    # Another site, another owner and an explicit go from the human are not part of the chain.
+    assert lease(stack, owner="wizard", url="https://other.example/")[0] == 200
+    assert lease(stack, owner="poller", url=url)[0] == 200
+    assert lease(stack, owner="wizard", url=url, matt_ok=True)[0] == 200
+
+
+def test_rule5_a_lease_that_comes_back_minutes_later_starts_a_new_chain(stack):
+    import proxy
+    url = "https://usage.example/"
+    for _ in range(4):
+        code, l = lease(stack, owner="usage-check", url=url)
+        assert code == 200
+        release(stack, l["lease_id"])
+        key = ("usage-check", "usage.example")
+        last, n = proxy._RETRIES[key]
+        proxy._RETRIES[key] = (last - proxy.RETRY_GAP - 1, n)   # as if the next run is minutes away
