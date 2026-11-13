@@ -17,6 +17,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Never route test leases to a real virtual Mac (agent_mac.py) on the machine running the tests.
+os.environ["BB_AGENT_MAC"] = "0"
+
 # Everything in these tests is 127.0.0.1. A proxy configured in the developer's
 # environment must not get in the way of urllib or the websocket clients.
 for _k in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):

@@ -1,0 +1,7 @@
+#!/bin/bash
+# bb-login-copy <site> [...]: copy just these sites' logins from Matt's Brave into the
+# virtual Mac's Brave, when a job needs them (Matt 11/13). Banks, government sites and
+# Authorize.net are refused (exit 5). See agent_mac.py.
+DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+PY="$(head -1 "$DIR/bb-desktop" | sed 's/^#!//; s/^\/usr\/bin\/env //')"
+exec ${PY:-python3} "$DIR/agent_mac.py" "$@"
