@@ -70,8 +70,10 @@ def fake_open(tmp_path):
     return bindir, pydir, log
 
 
-def run(args, env_extra, fake_open):
+def run(args, env_extra, fake_open, need="matt-asked"):
     bindir, pydir, _ = fake_open
+    if need and args:
+        args = ["--need", need, *args]
     env = {"PATH": f"{bindir}:{pydir}:/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")}
     env.update(env_extra)
     return subprocess.run(["bash", BB_SHOW, *args], capture_output=True, text=True,
@@ -83,6 +85,26 @@ def test_usage(fake_open):
     assert p.returncode == 1 and "usage: bb-show" in p.stderr
 
 
+def test_help_opens_nothing(broker_url, fake_open):
+    # 11/12-13: `bb-show --help` put a tab on Matt's screen 5 times, `--owner` once.
+    for a in (["--help"], ["-h"], ["--owner", "x", "https://x"]):
+        p = run(a, {"BROKER_URL": broker_url}, fake_open, need=None)
+        assert p.returncode in (0, 1)
+    p = run(["--need", "matt-asked", "https://x", "--owner"], {"BROKER_URL": broker_url}, fake_open, need=None)
+    assert p.returncode == 1
+    assert Broker.seen == [] and not fake_open[2].exists()
+
+
+def test_no_need_refused_and_nothing_opens(broker_url, fake_open):
+    p = run(["https://x"], {"BROKER_URL": broker_url}, fake_open, need=None)
+    assert p.returncode == 3 and "hidden tab" in p.stderr
+    p = run(["--need", "because", "https://x"], {"BROKER_URL": broker_url}, fake_open, need=None)
+    assert p.returncode == 3
+    p = run(["https://x"], {"BROKER_URL": "http://127.0.0.1:9"}, fake_open, need=None)
+    assert p.returncode == 3
+    assert Broker.seen == [] and not fake_open[2].exists()
+
+
 def test_shown(broker_url, fake_open):
     p = run(["https://x.example/a b?q=\"1\"", "agent-7", "show the report"],
             {"BROKER_URL": broker_url}, fake_open)
@@ -91,7 +113,7 @@ def test_shown(broker_url, fake_open):
     assert out[0] == 'shown: https://x.example/a b?q="1"'
     assert out[1].startswith("when the task is done, close it: bb-close agent-7")
     assert Broker.seen == [("/show", {"url": 'https://x.example/a b?q="1"', "owner": "agent-7",
-                                      "purpose": "show the report"})]
+                                      "purpose": "show the report", "need": "matt-asked"})]
     assert not fake_open[2].exists()
 
 

@@ -11,7 +11,16 @@ from conftest import http
 
 
 def show(stack, **body):
+    body.setdefault("need", "matt-asked")
     return http("POST", stack.api_base + "/show", body, timeout=30)
+
+
+def test_show_without_need_is_refused_and_logged(stack):
+    # 11/14 Matt: jobs kept popping up on his screen instead of running hidden.
+    code, r = http("POST", stack.api_base + "/show", {"owner": "yahoo-cleanup", "url": "https://mail.example/"})
+    assert code == 403 and "hidden" in r["error"]
+    code, r = http("POST", stack.api_base + "/show", {"owner": "x", "url": "https://mail.example/", "need": "why-not"})
+    assert code == 403
 
 
 def test_show_opens_a_foreground_tab_and_activates_it_once(stack):

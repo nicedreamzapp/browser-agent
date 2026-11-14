@@ -73,12 +73,12 @@ def test_status(client):
 
 def test_show_and_stage(client, monkeypatch):
     monkeypatch.setenv("BROKER_OWNER", "env-owner")
-    r = broker_client.show("https://a.example", dwell=30)
+    r = broker_client.show("https://a.example", dwell=30, need="matt-asked")
     assert r["owner"] == "env-owner"
     st = broker_client.stage()
     assert st["held_by"] == "env-owner"
     with pytest.raises(RuntimeError, match="screen busy: env-owner is showing https://a.example"):
-        broker_client.show("https://b.example", owner="other", wait=1)
+        broker_client.show("https://b.example", owner="other", wait=1, need="matt-asked")
 
 
 def test_failed_tab_connect_does_not_strand_the_lease(client, monkeypatch):
@@ -189,7 +189,7 @@ def test_show_passes_through_non_409_errors(scripted, monkeypatch):
 def test_show_body(scripted):
     broker_client.show("https://x", owner="o", purpose="p", wait=3, dwell=4)
     assert scripted.seen[-1] == ("/show", {"owner": "o", "url": "https://x", "purpose": "p",
-                                          "wait": 3, "dwell": 4})
+                                          "need": None, "wait": 3, "dwell": 4})
 
 
 def _bare_tab():

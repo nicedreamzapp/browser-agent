@@ -6,7 +6,14 @@
 # queue it. Two sessions doing it minutes apart is what throws the window back
 # and forth. This one queues.
 #
-#   bb-show [--reload] <url> [owner] [purpose]
+#   bb-show --need matt-types|matt-asked [--reload] <url> [owner] [purpose]
+#
+# HIDDEN FIRST (Matt, 2026-11-14: "why are tasks still being done with the browser
+# on the screen instead of the hidden terminal browser"). Agent work runs in hidden
+# tabs: broker_client lease(), bb-peek, bb-click, bb-form. bb-show is ONLY for:
+#   --need matt-types   he has to type or click himself (password, captcha, 2FA, sign, pay)
+#   --need matt-asked   he asked in words to see this page (or a rule says pull it up, e.g. invoices)
+# Without --need the broker refuses (exit 3) and nothing appears on his screen.
 #
 # ONE TAB PER JOB (Matt, 2026-10-23). The owner name is your job. The job owns
 # one tab on one site until you run bb-close <owner>. Showing the same site again
@@ -21,19 +28,41 @@
 #
 # When the task is done, close what you showed: bb-close <owner|url-substring>.
 #
-# Exit 0 shown · 1 error · 2 screen busy (say so and move on, do NOT force it)
+# Exit 0 shown · 1 error · 3 refused: no --need, work hidden · 2 screen busy (say so and move on, do NOT force it)
 #      4 the human is working in that tab: read what it shows, continue, do NOT reopen it
 #      5 stop: you keep reopening this page. Ask the human in one line what is wrong.
 set -u
 API="${BROKER_URL:-http://127.0.0.1:9223}"
-RELOAD=0
-if [ "${1:-}" = "--reload" ]; then RELOAD=1; shift; fi
+RELOAD=0; NEED=""
+USAGE="usage: bb-show --need matt-types|matt-asked [--reload] <url> [owner] [purpose]
+  Work hidden instead (lease(), bb-peek, bb-click, bb-form). Show only when Matt must
+  type/click himself (matt-types) or asked to see the page (matt-asked)."
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --reload) RELOAD=1; shift ;;
+    --need) NEED="${2:-}"; shift 2 2>/dev/null || shift ;;
+    --need=*) NEED="${1#--need=}"; shift ;;
+    -h|--help) echo "$USAGE"; exit 0 ;;
+    -*) echo "bb-show: unknown option $1 (nothing opened)" >&2; echo "$USAGE" >&2; exit 1 ;;
+    *) break ;;
+  esac
+done
 URL="${1:-}"; OWNER="${2:-${BROKER_OWNER:-$(basename "${CLAUDE_SESSION_ID:-agent}")}}"; WHY="${3:-}"
-[ -z "$URL" ] && { echo "usage: bb-show [--reload] <url> [owner] [purpose]" >&2; exit 1; }
+[ -z "$URL" ] && { echo "$USAGE" >&2; exit 1; }
+case "$URL" in -*) echo "bb-show: '$URL' is not a url (nothing opened)" >&2; exit 1 ;; esac
+case "$OWNER" in -*) echo "bb-show: owner '$OWNER' looks like an option (nothing opened)" >&2; exit 1 ;; esac
+case "$NEED" in
+  matt-types|matt-asked) ;;
+  *) echo "bb-show: refused, nothing opened on Matt's screen." >&2
+     echo "  Do this job in a hidden tab: broker_client lease(), bb-peek, bb-click, bb-form." >&2
+     echo "  Only show a page when Matt must type/click himself (--need matt-types)" >&2
+     echo "  or he asked to see it (--need matt-asked)." >&2
+     exit 3 ;;
+esac
 
-BODY=$(URL="$URL" OWNER="$OWNER" WHY="$WHY" RELOAD="$RELOAD" python3 -c '
+BODY=$(URL="$URL" OWNER="$OWNER" WHY="$WHY" RELOAD="$RELOAD" NEED="$NEED" python3 -c '
 import json,os
-b={"url":os.environ["URL"],"owner":os.environ["OWNER"],"purpose":os.environ["WHY"] or None}
+b={"url":os.environ["URL"],"owner":os.environ["OWNER"],"purpose":os.environ["WHY"] or None,"need":os.environ["NEED"]}
 if os.environ["RELOAD"]=="1": b["reload"]=True
 print(json.dumps(b))')
 
@@ -82,6 +111,7 @@ print("reloaded" if d.get("reloaded") else "moved" if d.get("moved") else "open"
   429) JSON="$JSON" python3 -c 'import json,os; print(json.loads(os.environ["JSON"]).get("error",""))' >&2 2>/dev/null \
          || echo "stop: you keep reopening this page" >&2
        exit 5 ;;
+  403) echo "broker refused to show it: $JSON" >&2; exit 3 ;;
   4??) echo "broker refused (code=$CODE): $JSON" >&2; exit 1 ;;
   *)   # Broker down. Nothing should break just because the polite path is gone.
        echo "broker not answering (code=${CODE:-none}) — falling back to a raw open" >&2

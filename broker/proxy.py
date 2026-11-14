@@ -134,6 +134,9 @@ def _recorder(flag=False):
     return REC
 
 
+SHOW_NEEDS = {"matt-types", "matt-asked"}
+
+
 def log(msg):
     line = f"[{datetime.now().isoformat(timespec='seconds')}] {msg}"
     print(line, flush=True)
@@ -2011,6 +2014,16 @@ class ApiHandler(BaseHTTPRequestHandler):
             if self.path.startswith("/show"):
                 if not b.get("url"):
                     return self._reply(400, {"error": "show needs a url"})
+                # Hidden first (Matt 2026-11-14): a page goes on his screen only when he must type/click
+                # himself or asked to see it. Everything else runs in a hidden lease.
+                if b.get("need") not in SHOW_NEEDS:
+                    log(f"show REFUSED -> {b.get('owner', 'anonymous')}: {b.get('url')} "
+                        f"({b.get('purpose') or 'no purpose'}), no need given; work hidden")
+                    return self._reply(403, {"error": "refused: not shown on Matt's screen. Work in a hidden tab "
+                                             "(lease(), bb-peek, bb-click, bb-form). Show only with need="
+                                             "'matt-types' (he must type/click: password, captcha, sign, pay) "
+                                             "or 'matt-asked' (he asked to see it).",
+                                             "needs": sorted(SHOW_NEEDS)})
                 try:
                     wait = STAGE_WAIT if b.get("wait") is None else int(b["wait"])
                     return self._reply(200, self._run(STAGE.show(

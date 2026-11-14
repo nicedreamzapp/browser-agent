@@ -17,7 +17,7 @@ screenshots again and prints what changed: URL, title, DOM, new tab, HTTP errors
 Works in hidden lease tabs; nothing is brought to the front.
 
 --visible takes the human's screen, so it runs only with --matt-ok (the human said
-take over) or when he has not touched the machine for 10+ minutes. The visible
+take over in words). Being idle is not a yes: he sees it when he comes back (11/14). The visible
 tab is owned by "<owner>-visible": close it with bb-close <owner>-visible.
 
 Exit 0 clicked and the page reacted · 2 clicked, nothing changed · 3 no such tab or
@@ -147,14 +147,13 @@ def main(argv):
 
     target = target_of(" ".join(args[1:]))
     if "--visible" in flags:
-        idle = bc.human_idle_seconds()
-        if "--matt-ok" not in flags and (idle is None or idle < IDLE_NEEDED):
-            print(f"not taking the screen: the human was active {idle and round(idle)}s ago and did not say take "
-                  f"over. Ask him in one line, then rerun with --matt-ok.", file=sys.stderr)
+        if "--matt-ok" not in flags:
+            print("not taking the screen: the human did not say take over. "
+                  "Ask him in one line, then rerun with --matt-ok.", file=sys.stderr)
             return 6
         vowner = owner + "-visible"
         try:
-            bc.show(info["url"], owner=vowner, purpose="bb-click --visible redo of a stuck hidden step")
+            bc.show(info["url"], owner=vowner, purpose="bb-click --visible redo of a stuck hidden step", need="matt-asked")
         except bc.HumanIsWorking as e:
             print(str(e), file=sys.stderr)
             return 4

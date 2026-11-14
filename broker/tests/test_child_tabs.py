@@ -14,6 +14,7 @@ from conftest import http
 
 def show(stack, **body):
     body.setdefault("dwell", 0)
+    body.setdefault("need", "matt-asked")
     return http("POST", stack.api_base + "/show", body, timeout=30)
 
 

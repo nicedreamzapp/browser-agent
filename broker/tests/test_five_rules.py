@@ -17,6 +17,7 @@ from conftest import http
 # ---- helpers ------------------------------------------------------------------
 def show(stack, **body):
     body.setdefault("dwell", 0)
+    body.setdefault("need", "matt-asked")
     return http("POST", stack.api_base + "/show", body, timeout=30)
 
 
@@ -363,18 +364,18 @@ def test_rule5_python_client_raises_the_right_errors(stack, monkeypatch):
     import broker_client
     monkeypatch.setattr(broker_client, "BROKER", stack.api_base)
     url = "https://people.example/optout"
-    r = broker_client.show(url, owner="tps", dwell=0)
+    r = broker_client.show(url, owner="tps", dwell=0, need="matt-asked")
     human_types(stack, r["target_id"])
     with pytest.raises(broker_client.HumanIsWorking) as e:
-        broker_client.show(url, owner="tps", dwell=0, reload=True)
+        broker_client.show(url, owner="tps", dwell=0, need="matt-asked", reload=True)
     assert e.value.page["human"]["active"] is True
     assert broker_client.human_active("tps") is True
     monkeypatch.setattr(stack.proxy, "HUMAN_QUIET", 0)
     broker_client.unshow("tps")
-    broker_client.show(url, owner="tps", dwell=0)
+    broker_client.show(url, owner="tps", dwell=0, need="matt-asked")
     broker_client.unshow("tps")
     with pytest.raises(broker_client.StopAndAsk):
-        broker_client.show(url, owner="tps", dwell=0)
+        broker_client.show(url, owner="tps", dwell=0, need="matt-asked")
 
 
 # ===============================================================================

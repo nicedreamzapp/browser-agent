@@ -654,8 +654,12 @@ class StopAndAsk(RuntimeError):
     in one line what is wrong. Retrying is what this exists to prevent."""
 
 
-def show(url, owner=None, purpose=None, wait=None, dwell=None, reload=False):
+def show(url, owner=None, purpose=None, wait=None, dwell=None, reload=False, need=None):
     """Put a page in front of the human, taking turns with every other agent.
+
+    HIDDEN FIRST: work in lease() tabs. `need` is required: "matt-types" (he must
+    type/click himself: password, captcha, sign, pay) or "matt-asked" (he asked to
+    see it). Without it the broker refuses with 403 and nothing appears.
 
     Use this instead of `open -a "Brave Browser" <url>` or AppleScript activate.
     Those go straight to macOS, around the proxy, and two agents doing it minutes
@@ -670,7 +674,7 @@ def show(url, owner=None, purpose=None, wait=None, dwell=None, reload=False):
     URL and move on), HumanIsWorking (continue from e.page) or StopAndAsk.
     """
     body = {"owner": owner or os.environ.get("BROKER_OWNER") or "anonymous", "url": url,
-            "purpose": purpose}
+            "purpose": purpose, "need": need}
     if wait is not None:
         body["wait"] = wait
     if dwell is not None:
