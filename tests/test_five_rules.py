@@ -229,10 +229,10 @@ def test_resuming_reports_what_he_did_while_the_agent_waited(tab, model):
 def test_human_changes_needs_evidence_and_describes_every_difference():
     now = time.time()
     b = {"url": FORM, "fields": {"Email": "a", "Name": "M"}, "human_last": None}
-    a = {"url": FORM + "/2", "fields": {"Email": "b", "Zip": "95570"}, "human_last": now}
+    a = {"url": FORM + "/2", "fields": {"Email": "b", "Zip": "62704"}, "human_last": now}
     out = agent.human_changes(b, a)
     assert any("page moved" in x for x in out)
-    assert '"Email" now holds "b" (was "a")' in out and '"Zip" now holds "95570"' in out
+    assert '"Email" now holds "b" (was "a")' in out and '"Zip" now holds "62704"' in out
     assert '"Name" was cleared' in out and any("typed or clicked" in x for x in out)
     assert agent.human_changes(b, dict(a, human_last=None)) == []
     assert agent.human_changes(None, a) == []

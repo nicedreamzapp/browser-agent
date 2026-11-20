@@ -137,20 +137,20 @@ def test_probe_scrub_js_sensitive_target_removes_selectors_too():
 @pytest.mark.parametrize("s,gone", [
     ("Order total: $1,249.50 (paid)", "1,249.50"),
     ("Refund of 39.99 USD issued", "39.99"),
-    ("Ship to: Jane Q. Doe, 4521 Westhaven Dr, Trinidad, CA 95570", "4521 Westhaven"),
-    ("Ship to: Jane Q. Doe", "Jane"),
+    ("Ship to: John Q. Public, 742 Evergreen Terrace, Springfield, IL 62704", "742 Evergreen"),
+    ("Ship to: John Q. Public", "John"),
     ("123 Main Street Apt 4B", "123 Main Street"),
-    ("PO Box 1234, Arcata", "1234"),
-    ("Trinidad, CA 95570-1234", "95570"),
+    ("PO Box 1234, Springfield", "1234"),
+    ("Springfield, IL 62704-1234", "62704"),
     ("Tracking 1Z999AA10123456784", "1Z999AA10123456784"),
     ("USPS 9400111899223197428490", "9400111899223197428490"),
     ("Order #2062561234 shipped", "2062561234"),
     ("ref 1234 5678 9012", "1234 5678 9012"),
-    ("Hi Melanie, your order is ready", "Melanie"),
+    ("Hi Taylor, your order is ready", "Taylor"),
     ("Dear Mr Smith", "Smith"),
-    ("From: Corey Johnson <x>", "Corey"),
-    ("To: Lucky Yao", "Lucky"),
-    ("Thanks, Jeremiah", "Jeremiah"),
+    ("From: Dana Rivera <x>", "Dana"),
+    ("To: Alex Chen", "Alex"),
+    ("Thanks, Jordan", "Jordan"),
 ])
 def test_probe_personal_data_in_names_titles_and_text(s, gone):
     # MED 4: Gmail subjects and senders, Woo order pages

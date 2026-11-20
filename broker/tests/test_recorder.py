@@ -501,7 +501,7 @@ def test_probe_private_host_records_only_the_action_and_role(rec_stack):
     stack.fake.snapshots[tid] = {
         "url": "https://mail.google.com/mail/u/0/#inbox/FMfcgzQXJWDsKmlQ", "title": "Inbox (3) - matt - Gmail",
         "focused": "e1", "masks": [],
-        "els": [{"id": "e0", "tag": "tr", "role": "row", "name": "Corey Johnson Re: my heater order 4521",
+        "els": [{"id": "e0", "tag": "tr", "role": "row", "name": "Dana Rivera Re: my heater order 4521",
                  "box": [0, 100, 800, 30]},
                 {"id": "e1", "tag": "div", "role": "textbox", "name": "Message Body", "box": [0, 300, 800, 200],
                  "field": True, "type": "contenteditable", "filled": True}]}
@@ -509,11 +509,11 @@ def test_probe_private_host_records_only_the_action_and_role(rec_stack):
     assert rec.worker.obs[tid]["shot"] is None            # never a screenshot of a private host
     c = stack.page_client(tid)
     click(c, [0, 100, 800, 30])
-    c.call("Input.insertText", text="Hi Corey, thanks")
+    c.call("Input.insertText", text="Hi Dana, thanks")
     c.call("Page.navigate", url="https://mail.google.com/mail/u/0/#sent?compose=abc")
     steps = finish(stack, rec, lease)
     t = all_text(rec)
-    for gone in ("Corey", "heater", "Inbox", "FMfcg", "compose", "Message Body", "thanks"):
+    for gone in ("Dana", "heater", "Inbox", "FMfcg", "compose", "Message Body", "thanks"):
         assert gone not in t, gone
     assert [x["action"]["type"] for x in steps] == ["click", "type", "navigate"]
     assert steps[0]["target"]["role"] == "row" and "name" not in steps[0]["target"]
