@@ -118,6 +118,63 @@ def lease_retry_check(owner, url):
             log(f"lease: refused {owner} reopening {key[1]}: open {n} in a row, each within {RETRY_GAP}s")
             raise StopAndAsk(owner, key[1], n - 1, max(1, (RETRY_GAP * (n - 1)) // 60))
         _RETRIES[key] = (now, n)
+# Store pace (Matt 2026-11-17, after Zoro flagged his network as a bot): on shopping
+# sites an agent behaves like a person shopping. One tab per store that stays open
+# and is reused (released store tabs are parked, not closed), page loads spaced out,
+# clicks and typing at a human pace, and a hard stop after a handful of loads so the
+# agent hands Matt the list instead of hammering the site. Prices and stock checks
+# belong in web search, not the browser.
+STORE_SITES = {"amazon.com", "zoro.com", "ebay.com", "pololu.com", "mcmaster.com", "walmart.com",
+               "homedepot.com", "lowes.com", "grainger.com", "aliexpress.com", "alibaba.com", "temu.com",
+               "sendcutsend.com", "etsy.com", "newegg.com", "bestbuy.com", "target.com", "robotshop.com",
+               "servocity.com", "digikey.com", "mouser.com", "adafruit.com", "sparkfun.com", "fastenal.com",
+               "harborfreight.com", "acehardware.com", "uline.com", "ebay.ca", "amazon.ca"}
+STORE_GAP = int(os.environ.get("BROKER_STORE_GAP", 12))          # min seconds between page loads on one store
+STORE_INPUT_GAP = float(os.environ.get("BROKER_STORE_INPUT_GAP", 1.2))  # min seconds between clicks/keys
+STORE_WINDOW = 600
+STORE_MAX = int(os.environ.get("BROKER_STORE_MAX", 8))           # page loads per store per 10 min, then stop
+STORE_PARK = int(os.environ.get("BROKER_STORE_PARK", 7200))      # a parked store tab stays open this long
+_STORE_LOADS = {}
+_STORE_INPUT = {}
+_STORE_LOCK = threading.Lock()
+
+
+def is_store(url):
+    s = site_of(url) if url else ""
+    return any(s == d or s.endswith("." + d) for d in STORE_SITES)
+
+
+def store_load_wait(url):
+    """Seconds to wait before the next page load on this store, or a refusal string when the
+    store has had its share of loads. Records the load when it is allowed."""
+    if not is_store(url):
+        return 0, None
+    site, now = site_of(url), time.time()
+    with _STORE_LOCK:
+        loads = [t for t in _STORE_LOADS.get(site, []) if now - t < STORE_WINDOW]
+        if len(loads) >= STORE_MAX:
+            _STORE_LOADS[site] = loads
+            log(f"store pace: refused a load on {site}: {len(loads)} loads in {STORE_WINDOW // 60} min")
+            return 0, (f"store pace: {site} already had {len(loads)} page loads in the last "
+                       f"{STORE_WINDOW // 60} minutes. More would look like a bot and can get Matt flagged. "
+                       "Stop here: hand Matt the ready list or one link, and use web search for prices.")
+        wait = 0.0
+        if loads:
+            wait = max(0.0, STORE_GAP - (now - loads[-1])) + (hash((site, now)) % 2000) / 1000
+        loads.append(now + wait)
+        _STORE_LOADS[site] = loads
+    return wait, None
+
+
+def store_input_wait(tid):
+    now = time.time()
+    with _STORE_LOCK:
+        last = _STORE_INPUT.get(tid, 0)
+        wait = max(0.0, STORE_INPUT_GAP - (now - last)) + ((hash((tid, now)) % 700) / 1000 if last else 0)
+        _STORE_INPUT[tid] = now + wait
+    return wait
+
+
 PORT_GRACE = 8                     # seconds a restarting proxy waits for the old one to let go
 # The Broker Recorder (2026-10-31): off unless BROKER_RECORD=1 (every job) or a client
 # asks for its own job (POST /lease {"record": true}, or X-Broker-Record: 1 on a CDP
@@ -894,6 +951,29 @@ async def agent_gate(tid, method, params):
     Called for every command an agent sends through the proxy to a tab."""
     if not method:
         return None
+    if method in ("Page.navigate", "Page.reload"):
+        dest = (params or {}).get("url")
+        if not dest:
+            try:
+                dest = (await UP.send("Target.getTargetInfo", targetId=tid)).get("targetInfo", {}).get("url", "")
+            except Exception:
+                dest = ""
+        if is_store(dest) and not HUMANS.active(tid):
+            wait, refusal = store_load_wait(dest)
+            if refusal:
+                return refusal
+            if wait:
+                await asyncio.sleep(wait)
+    elif method in ("Input.dispatchMouseEvent", "Input.dispatchKeyEvent", "Input.insertText") and \
+            (params or {}).get("type") in (None, "mousePressed", "keyDown", "rawKeyDown", "char"):
+        try:
+            cur = (await UP.send("Target.getTargetInfo", targetId=tid)).get("targetInfo", {}).get("url", "")
+        except Exception:
+            cur = ""
+        if is_store(cur):
+            w = store_input_wait(tid)
+            if w:
+                await asyncio.sleep(w)
     # DOM.setFileInputFiles fires trusted input/change events on the file field, so it
     # counts as the agent's own input too (2026-10-23: a LinkedIn image upload in a
     # hidden tab read as "the human is working here" and blocked the agent's next click).
@@ -1939,13 +2019,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                 # fill in while the human was looking at (and typing in) the first.
                 # 2026-11-07: any job's tab on that site counts, not only this owner's.
                 url = b.get("url")
-                if not b.get("matt_ok"):
+                shared = (STAGE.job_tab(owner, url) or STAGE.site_job_tab(url)) if url else None
+                # 2026-11-19: leasing the job's tab that is already on screen opens nothing,
+                # so it never counts toward the reopen guard (each bb-peek/bb-form/bb-click
+                # on Matt's one EasyPost tab was counted as a "reopen" and got refused).
+                if not b.get("matt_ok") and not shared:
                     try:
                         lease_retry_check(owner, url)
                     except StopAndAsk as e:
                         return self._reply(429, {"error": str(e) + " Put every step of the job in ONE script"
                                                  " and ONE lease so the site loads once.", "stop_and_ask": True})
-                shared = (STAGE.job_tab(owner, url) or STAGE.site_job_tab(url)) if url else None
                 reused = None
                 if shared and shared not in REG.tabs:
                     tid = self._run(REG.adopt(shared, owner, ttl))
@@ -1961,8 +2044,18 @@ class ApiHandler(BaseHTTPRequestHandler):
                                 "human_active": True, "seconds_ago": round(HUMANS.seconds_ago(tid), 1)})
                         reused = REG.hand_over(tid, owner, ttl)
                         if not REG.tabs[tid].get("shared") and page_key(now) != page_key(url):
+                            wait, refusal = store_load_wait(url)
+                            if refusal:
+                                return self._reply(429, {"error": refusal, "stop_and_ask": True, "store_pace": True})
+                            if wait:
+                                time.sleep(wait)
                             self._run(STAGE._navigate(tid, url))
                     else:
+                        wait, refusal = store_load_wait(url)
+                        if refusal:
+                            return self._reply(429, {"error": refusal, "stop_and_ask": True, "store_pace": True})
+                        if wait:
+                            time.sleep(wait)
                         tid = self._run(REG.create(owner, url, hidden=bool(b.get("hidden", True)),
                                                    kind="rest", ttl=ttl))
                 i = REG.tabs[tid]
@@ -2002,6 +2095,20 @@ class ApiHandler(BaseHTTPRequestHandler):
                                                      "left_open": f"{i['owner']} still holds it (same site)"})
                         if REC is not None and (b.get("outcome") or b.get("task")):
                             REC.outcome(b["lease_id"], b.get("outcome"), b.get("task"), b.get("note"))
+                        try:
+                            cur = self._run(UP.send("Target.getTargetInfo", targetId=tid)).get(
+                                "targetInfo", {}).get("url", "")
+                        except Exception:
+                            cur = i.get("url", "")
+                        if is_store(cur) and not STAGE.job_of(tid):
+                            # store tabs are parked, never closed: open/close churn is what reads as a bot
+                            i.update(owner="store-park", lease_id=uuid.uuid4().hex[:12], holders={},
+                                     expires=time.time() + STORE_PARK, attached=1)
+                            REG._save()
+                            log(f"tab {tid[:12]} parked on {site_of(cur)} (store tab, reused by the next job)")
+                            return self._reply(200, {"released": b["lease_id"], "tab_closed": False,
+                                                     "left_open": "parked store tab; the next job on this "
+                                                                  "store reuses it (no open/close churn)"})
                         kids = {}
                         closed = self._run(REG.close(tid, "released", kids))
                         r = {"released": b["lease_id"], "tab_closed": bool(closed)}
