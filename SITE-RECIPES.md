@@ -536,6 +536,7 @@ The `.wt-toast` "attribute suggestions" toast covers "Publish changes" and won't
 ## LinkedIn native video: hidden lease now fails (2026-11-03)
 - Hidden lease without focus emulation: clicking "Media" leaves the Editor stuck on "Loading" and no file input appears. Call `Emulation.setFocusEmulationEnabled` then reload before clicking Media; the input then shows up.
 - Even with that, Post from a HIDDEN tab ended in the toast "We encountered a problem sharing your post." twice (3 MB H.264 mp4, nothing posted). The same script with `lease(..., hidden=False)` on the idle mini posted at once and the toast link appeared. Video posts: use a visible lease on an idle machine (10+ idle minutes) from the start.
+- **Update 2026-11-21:** a hidden lease posted a 54 MB native video fine again: `Emulation.setFocusEmulationEnabled`, `Page.setWebLifecycleState active`, reload the composer URL, then Media, Next, text, Post; the toast link came back and the post page read back text + video. Try hidden first; fall back to visible only on the "problem sharing" toast.
 - Script: mini `~/Scripts/ccl-launch/li_post.py` (dry run by default, `--post` posts, reads back text and video on the post page).
 
 ## Google Cloud console: enabling an API (2026-11-03)
