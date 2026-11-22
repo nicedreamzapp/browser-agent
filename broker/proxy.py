@@ -791,6 +791,7 @@ class Humans:
         self.touch = {}      # tid -> [epoch seconds of any agent command that can type (input or scripts)]
         self.masked = {}     # tid -> {(t, kind)} already judged the agent's own; never re-judged later
         self.tasks = {}      # tid -> the watcher task holding the listener in place
+        self.handed = {}     # tid -> epoch seconds Matt handed the tab back; older input never counts again
 
     # ---- what happened -------------------------------------------------------
     def agent_input(self, tid, t=None):
@@ -822,6 +823,8 @@ class Humans:
 
     def note(self, tid, t, kind):
         """Record one trusted input event. False when it was really the agent's own input."""
+        if t <= self.handed.get(tid, 0):
+            return False             # before he handed the tab back (peek re-reads the page's record)
         m = self.masked.setdefault(tid, set())
         if (round(t, 3), kind) in m:
             return False
@@ -886,6 +889,17 @@ class Humans:
                 "inputs": len(self.events.get(tid, ())),
                 "watched": tid in self.tasks}
 
+    def handback(self, tid):
+        """Matt said he is done in `tid` ("I'm in", "done"): his past input stops protecting it.
+
+        2026-11-21: after he signed into Yelp the agent still waited out HUMAN_QUIET before it
+        could click in that tab, and he had to keep his hands off it. Any new input from him
+        protects the tab again as usual; the listener stays in place."""
+        had = len(self.events.get(tid, ()))
+        self.events.pop(tid, None)
+        self.handed[tid] = time.time()
+        return had
+
     def guard(self, tid, action):
         """Raise HumanBusy if the human is using `tid`. `action` reads "reloaded", "closed"..."""
         if tid and self.active(tid):
@@ -909,6 +923,7 @@ class Humans:
         self.agent.pop(tid, None)
         self.touch.pop(tid, None)
         self.masked.pop(tid, None)
+        self.handed.pop(tid, None)
 
     async def _watch(self, tid):
         me = asyncio.current_task()
@@ -2030,6 +2045,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                         return self._reply(429, {"error": str(e) + " Put every step of the job in ONE script"
                                                  " and ONE lease so the site loads once.", "stop_and_ask": True})
                 reused = None
+                # 2026-11-21: handback=True means Matt said he is done in the job's tab
+                # ("I'm in"), so his earlier typing there no longer blocks the agent.
+                if b.get("handback") and shared:
+                    n_back = HUMANS.handback(shared)
+                    log(f"handback: {owner} took tab {shared[:12]} back from the human ({n_back} inputs cleared)")
                 if shared and shared not in REG.tabs:
                     tid = self._run(REG.adopt(shared, owner, ttl))
                 else:
@@ -2071,6 +2091,19 @@ class ApiHandler(BaseHTTPRequestHandler):
                                          "ws_url": f"ws://127.0.0.1:{LISTEN}/devtools/page/{tid}",
                                          "expires_in": ttl, "shared_with_shown_job": bool(shared),
                                          "reused_tab_of": reused})
+            if self.path.startswith("/handback"):
+                # Matt said he is done in a tab: hand it back to the agent now (bb-handback).
+                match = b.get("match") or ""
+                if not match:
+                    return self._reply(400, {"error": "handback needs match=<owner|url-substring|target-id>"})
+                tabs = self._run(STAGE.peek(match, 0))
+                done = []
+                for t in tabs or ():
+                    tid = t.get("target_id") or ""
+                    if tid:
+                        done.append({"target": tid[:12], "inputs_cleared": HUMANS.handback(tid)})
+                log(f"handback {match!r}: {done}")
+                return self._reply(200 if done else 404, {"match": match, "handed_back": done})
             if self.path.startswith("/renew"):
                 # Pool and browser-client tabs carry lease_id None: a body with no
                 # lease_id must not match them.

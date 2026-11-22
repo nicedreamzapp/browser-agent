@@ -1,0 +1,11 @@
+#!/bin/bash
+# bb-handback — Matt said he is done in a tab ("I'm in", "done"): hand it back to the agent now.
+# His earlier typing there stops blocking the agent's clicks; new input from him protects it again.
+# (2026-11-21: after his Yelp sign-in he had to keep hands off the tab for 30 s. Never again.)
+#
+#   bb-handback <owner|url-substring|target-id>
+set -u
+API="${BROKER_URL:-http://127.0.0.1:9223}"
+[ -z "${1:-}" ] && { echo "usage: bb-handback <owner|url-substring|target-id>" >&2; exit 1; }
+BODY=$(M="$1" python3 -c 'import json,os;print(json.dumps({"match":os.environ["M"]}))')
+curl -sS -m 20 -X POST -H 'Content-Type: application/json' -d "$BODY" "$API/handback"; echo

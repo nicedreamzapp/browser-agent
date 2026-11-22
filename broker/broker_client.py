@@ -385,13 +385,15 @@ def visible_labels(tab):
 
 @contextmanager
 def lease(owner, url=None, purpose=None, hidden=True, ttl=TTL, step_timeout=None, matt_ok=False,
-          agent_mac=None):
+          agent_mac=None, handback=False):
     """Hidden jobs with a url run in the virtual Mac first (Matt 11/13, "fighting over the
     screen"): that one site's login is copied from his Brave into it, and the job never
     touches his screen. It falls back to a hidden tab in his Brave when the virtual Mac is
     busy or unset on this machine, the site is a one-session site (bank, government,
     Authorize.net), or agent_mac=False. BB_AGENT_MAC=0 turns it off everywhere."""
     use = agent_mac if agent_mac is not None else os.environ.get("BB_AGENT_MAC", "1") != "0"
+    if handback:            # Matt said he is done in the shown tab: work in that tab, now
+        use = False
     if use and hidden and url and os.path.exists(os.path.expanduser("~/.ssh/config")) and \
             "Host agentmac" in open(os.path.expanduser("~/.ssh/config")).read():
         try:
@@ -416,12 +418,13 @@ def lease(owner, url=None, purpose=None, hidden=True, ttl=TTL, step_timeout=None
                 if ok:
                     cm.__exit__(None, None, None)
             return
-    with _brave_lease(owner, url, purpose, hidden, ttl, step_timeout, matt_ok) as tab:
+    with _brave_lease(owner, url, purpose, hidden, ttl, step_timeout, matt_ok, handback) as tab:
         yield tab
 
 
 @contextmanager
-def _brave_lease(owner, url=None, purpose=None, hidden=True, ttl=TTL, step_timeout=None, matt_ok=False):
+def _brave_lease(owner, url=None, purpose=None, hidden=True, ttl=TTL, step_timeout=None, matt_ok=False,
+                 handback=False):
     """Hold a tab for one job. One agent tab per site: when an agent's tab on that site is
     already open the broker hands you that tab (tab.reused_tab_of says whose) instead of
     a second one. Every CDP step is capped at `step_timeout` s (default STEP_TIMEOUT).
@@ -430,7 +433,7 @@ def _brave_lease(owner, url=None, purpose=None, hidden=True, ttl=TTL, step_timeo
     every step in ONE script and ONE lease; matt_ok=True only when Matt said to retry."""
     try:
         g = _post("/lease", {"owner": owner, "url": url, "purpose": purpose,
-                             "hidden": hidden, "ttl": ttl, "matt_ok": matt_ok})
+                             "hidden": hidden, "ttl": ttl, "matt_ok": matt_ok, "handback": handback})
     except HTTPError as e:
         if e.code not in (423, 429):
             raise

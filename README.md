@@ -565,6 +565,7 @@ C: HTTP 200 after 7.9s   waited, then shown
 | `POST /show` | `{owner, url, purpose, wait, dwell, reload}` → `{shown, target_id, held_for, already_open, moved, reloaded, page}`; `409` screen busy, `423` the human is working in that tab (with `page`), `429` stop and ask |
 | `POST /unshow` | `{match}` (owner or URL part) → `{closed, left_open}`, what `bb-close` calls |
 | `GET /peek?match=` | read-only state of matching tabs: `url, title, text, fields, human`, what `bb-peek` calls |
+| `POST /handback {match}` | the human said he is done in a tab ("I'm in"): his earlier input there stops blocking agent clicks; new input protects it again. `bb-handback` calls it; `lease(..., handback=True)` does it while leasing the job's shown tab |
 | `GET /human` | seconds since the human last typed or clicked in any watched tab, what `bb-click --visible` checks |
 | `POST /unstage` | drop the hold early |
 | `GET /stage` | who has the screen and what is on it |
@@ -604,6 +605,7 @@ Designed and written by Matt Macosko:
 - [`bb-show`](broker/bb-show): the shell command agents use to ask for the screen instead of `open -a`.
 - [`bb-close`](broker/bb-close): closes what `bb-show` put up once the task is done (by owner or URL substring).
 - [`bb-peek`](broker/bb-peek): reads a tab's state (URL, title, text, filled fields, whether the human is in it) without showing anything.
+- [`bb-handback`](broker/bb-handback): hands a tab back to the agent the moment the human says he is done in it (signed in, typed his code), instead of waiting out the quiet period.
 - [`bb-click`](broker/bb-click): clicks like a person in a tab you hold, hidden or shown: screenshot, find the button, trusted mouse click at its center, screenshot again, and report what changed. `--check` says when a hidden tab is stuck (blank, 401/403, signed out); `--visible` redoes the step in a shown tab, only when the human said take over or has been idle 10+ minutes.
 - [`bb-labels`](broker/bb-labels): a fresh screenshot plus the exact button, link and tab texts visible in a tab you hold. The only words an agent may quote to the human.
 - [`hooks-example-focus-guard.py`](broker/hooks-example-focus-guard.py): an example Claude Code `PreToolUse` hook that redirects `open -a <browser>` and AppleScript `activate` to `bb-show`.
