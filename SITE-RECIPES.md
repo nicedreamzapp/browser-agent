@@ -554,3 +554,9 @@ Never solve it. Build a prefilled URL (Jotform: `?yourName[first]=..&yourEmail=.
 
 ## Required phone on cannabisbusinesstimes.com contact form
 Submit stays `disabled` until every field incl. phone is filled; use the shop's public number from ineedhemp.com/contact-us.
+
+## porkbun.com — domain transfer in (2026-11-22)
+- Login is two steps with a Pork Captcha checkbox between them: fill username, the human ticks "I'm not a robot" and Continue, then fill `#loginPassword`, click "Log in". A new device gets an emailed one-time code: field `#twoFactorLoginCodeEmailNoCookie`, then "Log in" again.
+- The transfer form ignores script clicks: use `bb-form` for `#transferDomain` / `#transferAuthCode` and a trusted `bb-click "Submit"`, then "Add Transfers to Cart".
+- `#transferProcessSetupDns` ("Pause my transfer until I've set up DNS here") is CHECKED by default. Untick it when the domain keeps its outside nameservers, or the transfer sits paused.
+- Checkout: tick `#tosAgreement`, pick "On File" payment, "Continue to Billing", then "Pay Now"; success URL is /checkout/success/<order>.
