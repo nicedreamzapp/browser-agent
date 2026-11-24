@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""bb-captcha: solve a captcha on Matt's own pages for him, quietly, like a person.
+
+Matt (2026-11-23): he keeps his captchas; the agent is his hands and solves them on his
+own machines. One quiet connection per call, a curved mouse path before every press,
+no screenshots of the page unless asked, nothing brought to the front, no reload.
+
+    bb-captcha <owner> status                 what the captcha shows now (cleared / challenge open / prompt)
+    bb-captcha <owner> checkbox               click the "I am human" box, wait for a pass or a challenge
+    bb-captcha <owner> shot [path]            crop of the open challenge: PNG path, origin, scale, tile centres
+    bb-captcha <owner> click P [P ...]        click points in ONE quiet session. P is
+                                                x,y      viewport CSS px
+                                                img:x,y  pixels in the last shot (origin + x/scale)
+                                                t4       tile 4 from the last shot (numbered left-to-right, top-down)
+    bb-captcha <owner> drag P1 P2 [P1 P2 ...] drag each piece from P1 to P2 (drag-to-outline challenges)
+    bb-captcha <owner> submit                 press Verify / Next / Skip, say whether it cleared
+    bb-captcha <owner> solve P [P ...]        click + submit in one session
+
+Read the shot PNG, pick the tiles that match the prompt, click them, submit. When it
+says "another round", shot again. Exit 0 cleared · 2 not cleared yet · 3 no tab or no
+captcha · 4 the human is working in that tab · 1 error.
+"""
+import json, os, random, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import broker_client as bc  # noqa: E402
+import quiet as q           # noqa: E402
+
+
+def say(st):
+    if st.get("cleared"):
+        print("CLEARED: the captcha passed (token set / box checked)")
+    elif st.get("challenge_open"):
+        print(f"challenge open: \"{st.get('prompt')}\"" + (f"  error: {st['error']}" if st.get("error") else ""))
+        if st.get("button"):
+            print(f"  button reads: {st['button']}")
+        if st.get("tiles"):
+            print("  tiles (n: x,y): " + "  ".join(f"t{t['n']}:{t['x']},{t['y']}{'*' if t['selected'] else ''}"
+                                                   for t in st["tiles"]))
+    else:
+        print("not cleared, no challenge open" + (f" ({st['note']})" if st.get("note") else ""))
+    return 0 if st.get("cleared") else 2
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] not in ("status", "checkbox", "shot", "click", "drag", "submit", "solve"):
+        print(__doc__.split("\n\n")[2], file=sys.stderr)
+        return 1
+    owner, cmd, rest = argv[0], argv[1], argv[2:]
+    try:
+        with q.quiet(owner) as s:
+            cf = q.captcha_frames(s)
+            if not cf["kind"]:
+                print("no hCaptcha / reCAPTCHA / Turnstile frame on this page", file=sys.stderr)
+                return 3
+            if cmd == "status":
+                return say(q.captcha_status(s, cf))
+            if cmd == "checkbox":
+                return say(q.captcha_checkbox(s))
+            if cmd == "shot":
+                info = q.captcha_shot(s, rest[0] if rest else None)
+                print(f"shot: {info['path']}  ({info['which']}, {info['size'][0]}x{info['size'][1]} px)")
+                print(f"  origin {info['origin'][0]},{info['origin'][1]}  scale {info['scale']} "
+                      f"(page x = {info['origin'][0]} + img_x / {info['scale']})")
+                return say(info)
+            if cmd == "drag":
+                pts = [q.to_page(owner, p) for p in rest]
+                if len(pts) < 2 or len(pts) % 2:
+                    print("give pairs of points: from to [from to ...]", file=sys.stderr)
+                    return 1
+                s.mark()
+                for i in range(0, len(pts), 2):
+                    if i:
+                        time.sleep(random.uniform(0.3, 0.7))
+                    s.drag(pts[i], pts[i + 1])
+                ch = s.wait_change(1.5)
+                print(f"dragged {len(pts) // 2} piece(s); " + ("; ".join(ch) if ch else "nothing changed in any frame"))
+                return say(q.captcha_status(s))
+            if cmd in ("click", "solve"):
+                pts = [q.to_page(owner, p) for p in rest]
+                if not pts:
+                    print("give at least one point", file=sys.stderr)
+                    return 1
+                s.mark()
+                s.clicks(pts)
+                ch = s.wait_change(1.5)
+                print(f"clicked {len(pts)} point(s): " + " ".join(f"{round(x)},{round(y)}" for x, y in pts))
+                print("  " + ("; ".join(ch) if ch else "nothing changed in any frame"))
+                if cmd == "click":
+                    return say(q.captcha_status(s))
+            st = q.captcha_submit(s)
+            if st.get("pressed"):
+                print(f"pressed {st['pressed']}")
+            if not st.get("cleared") and st.get("challenge_open"):
+                print("another round (or a retry): run shot again")
+            return say(st)
+    except LookupError as e:
+        print(str(e), file=sys.stderr)
+        return 3
+    except bc.HumanIsWorking as e:
+        print(str(e), file=sys.stderr)
+        return 4
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

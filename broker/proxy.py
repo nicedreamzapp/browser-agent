@@ -93,6 +93,11 @@ AGENT_ECHO = 1.5                   # trusted events this soon after an agent's o
 AGENT_ACTIVE = int(os.environ.get("BROKER_AGENT_ACTIVE", 30))
 AGENT_TOUCH = ("Runtime.evaluate", "Runtime.callFunctionOn", "DOM.focus")   # recorded, never blocked
 GENUINE = ("pointerdown", "keydown", "paste")   # inputs only a person makes; they always count
+# 2026-11-23: an agent clicked an hCaptcha box and ~4 s later the captcha moved focus into
+# its challenge iframe by script. The window blur read as "frame" input from the human and
+# blocked the agent's next click for 20 s. A frame focus this soon after the agent's own
+# input, with no real click or key from him since, is the page answering the agent.
+FRAME_ECHO = float(os.environ.get("BROKER_FRAME_ECHO", 8))
 CHURN_WINDOW = int(os.environ.get("BROKER_CHURN_WINDOW", 600))  # seconds an open/close cycle is remembered
 CHURN_LIMIT = int(os.environ.get("BROKER_CHURN_LIMIT", 2))      # cycles allowed before "stop and ask"
 # Rule 5 for REST leases (2026-11-09): a job split over several scripts reloads the
@@ -814,6 +819,10 @@ class Humans:
     def _is_echo(self, tid, t, kind=""):
         if any(a - 0.25 <= t <= a + AGENT_ECHO for a in self.agent.get(tid, ())):
             return True
+        if kind == "frame":
+            last = max((a for a in self.agent.get(tid, ()) if a - 0.25 <= t), default=None)
+            return last is not None and t - last <= FRAME_ECHO and \
+                not any(last < e <= t and k in GENUINE for e, k in self.events.get(tid, ()))
         if kind not in ("input", "change"):
             return False             # his keys, clicks and pastes always count
         last = max((a for a in self.touch.get(tid, ()) if a - 0.25 <= t), default=None)

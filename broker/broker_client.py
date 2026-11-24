@@ -229,11 +229,20 @@ class Tab:
         out["stuck"] = self.stuck_check(out)
         return out
 
-    def click_trusted(self, target, wait=3.0, shots=True, label="click"):
+    def click_trusted(self, target, wait=3.0, shots=True, label="click", quiet_auto=True):
         """Screenshot, find `target` (text / selector, or an (x, y) tuple), trusted mouse click
         at its center, wait, screenshot again. Returns what changed (url, title, DOM, new tabs,
         HTTP errors, stuck verdict) plus the two screenshot paths. Raises StuckAskHuman when
-        the browser stops answering mid-click (a hidden tab holding input)."""
+        the browser stops answering mid-click (a hidden tab holding input).
+        On login and captcha pages it clicks quietly instead (quiet.py, 2026-11-23): no
+        screenshots, no focus flips, a curved mouse path, changes seen in every frame."""
+        if quiet_auto:
+            import quiet as _quiet
+            if _quiet.sensitive(self):
+                try:
+                    return _quiet.quiet_click(self, target, wait=wait)
+                except StepTimeout as e:
+                    raise self._stuck(f"clicking {target!r} hung: {e}", label) from None
         try:
             before = self._before(shots, label)
             if isinstance(target, (tuple, list)):

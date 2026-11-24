@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""bb-session: run a whole multi-step job in ONE quiet connection to a tab.
+
+Matt (2026-11-23): one bb-click per step reconnected, screenshotted and repainted his
+wp-login page on every click. A session holds one socket for every step, moves the mouse
+like a person, takes no screenshots unless a step asks, never brings the tab forward,
+never reloads, and sees changes inside cross-origin frames (captchas, payment boxes).
+
+    bb-session <owner> open <url>          open a HIDDEN lease tab for this owner (lives until close / 15 min idle)
+    bb-session <owner> close               close that hidden tab
+    bb-session <owner> STEP [STEP ...]     run the steps in the owner's open tab (shown job tab or hidden lease)
+
+Steps:
+    click:x,y          human click at viewport CSS px
+    click:"Log In"     human click on text / aria-label / CSS selector in the page
+    type:@file         type the text in a file (keep secrets off the command line)
+    type:$VAR          type the value of an environment variable
+    type:text          type plain, non-secret text
+    key:Enter          Enter, Tab, Escape, Backspace, ArrowDown, ArrowUp
+    wait:1.5           pause (seconds)
+    shot               save a screenshot (only when you ask for it)
+    url                print the page URL
+
+Typed text is never printed. Exit 0 done · 3 no such tab or element · 4 the human is
+working in that tab · 1 error.
+"""
+import os, random, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import broker_client as bc  # noqa: E402
+import quiet as q           # noqa: E402
+
+
+def text_of(arg):
+    if arg.startswith("@"):
+        with open(os.path.expanduser(arg[1:])) as f:
+            return f.read().rstrip("\n")
+    if arg.startswith("$"):
+        v = os.environ.get(arg[1:])
+        if v is None:
+            raise LookupError(f"environment variable {arg[1:]} is not set")
+        return v
+    return arg
+
+
+def run(s, step):
+    kind, _, arg = step.partition(":")
+    if kind == "click":
+        tgt = arg.strip().strip('"')
+        parts = tgt.replace(" ", "").split(",")
+        try:
+            tgt = (float(parts[0]), float(parts[1])) if len(parts) == 2 else tgt
+        except ValueError:
+            pass
+        s.mark()
+        r = s.click(tgt)
+        ch = s.wait_change(2.5)
+        el = r.get("element") or {}
+        print(f"click {r['x']},{r['y']}" + (f" <{el.get('tag')}> \"{el.get('text', '')}\"" if el else "")
+              + ": " + ("; ".join(ch) if ch else "nothing changed in any frame"))
+    elif kind == "type":
+        txt = text_of(arg)
+        s.type(txt)
+        print(f"typed {len(txt)} characters")
+    elif kind == "key":
+        s.key(arg or "Enter")
+        print(f"key {arg or 'Enter'}")
+    elif kind == "wait":
+        time.sleep(float(arg or 1))
+    elif kind == "shot":
+        path, size = s.shot()
+        print(f"screenshot: {path} ({size[0]}x{size[1]})")
+    elif kind == "url":
+        print(s.url())
+    else:
+        raise ValueError(f"unknown step {step!r}")
+    time.sleep(random.uniform(0.2, 0.5))
+
+
+def main(argv):
+    if len(argv) < 2:
+        print(__doc__.split("\n\n")[2], file=sys.stderr)
+        return 1
+    owner = argv[0]
+    if argv[1] == "open":
+        if len(argv) < 3:
+            print("bb-session <owner> open <url>", file=sys.stderr)
+            return 1
+        g = q.open_hidden(owner, argv[2], purpose="bb-session")
+        time.sleep(2)
+        print(f"hidden tab {g.get('target_id', '')[:12]} open for {owner} (close it with: bb-session {owner} close)")
+        return 0
+    if argv[1] == "close":
+        if q.close_hidden(owner):
+            print(f"closed {owner}'s hidden tab")
+            return 0
+        print(f"no hidden bb-session tab held for {owner} (a shown tab closes with bb-close {owner})", file=sys.stderr)
+        return 3
+    try:
+        with q.quiet(owner) as s:
+            why = q.sensitive(s.tab)
+            if why:
+                print(f"quiet mode ({why})")
+            for step in argv[1:]:
+                run(s, step)
+    except LookupError as e:
+        print(str(e), file=sys.stderr)
+        return 3
+    except bc.HumanIsWorking as e:
+        print(str(e), file=sys.stderr)
+        return 4
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except bc.HTTPError as e:
+        print(f"broker refused: {e.code} {e.read()[:300]!r}", file=sys.stderr)
+        sys.exit(1)

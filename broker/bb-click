@@ -10,6 +10,11 @@ and press the button within 10 seconds."
     bb-click --js <owner> "<text>"                  script click first, trusted retry if nothing moves in 3 s
     bb-click --visible [--matt-ok] <owner> "<text>" redo the step in a visible bb-show tab
     bb-click --check <owner>                        is this tab stuck (blank, 401/403, signed out)?
+    bb-click --shots <owner> 640,410                force before/after screenshots on a login/captcha page
+
+On login and captcha pages bb-click goes quiet on its own (2026-11-23): no screenshots,
+no focus flips, a curved mouse path, and changes inside cross-origin frames count. For
+several steps use bb-session (one connection for the whole job); for captchas bb-captcha.
 
 It screenshots the tab, finds the element's box (scrolled into view), sends a
 TRUSTED mouse click (Input.dispatchMouseEvent: moved, pressed, released), waits,
@@ -32,6 +37,7 @@ from urllib.request import Request, urlopen
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import broker_client as bc  # noqa: E402
+import quiet                # noqa: E402
 
 IDLE_NEEDED = 600
 
@@ -47,7 +53,13 @@ def find_tab(owner):
         tabs = json.load(r)["tabs"]
     mine = [t for t in tabs if t.get("leased_by") == owner or owner in (t.get("shown_by") or [])
             or t.get("child_owner") == owner or (len(owner) >= 8 and (t.get("target_id") or "").startswith(owner))]
-    return mine[0] if mine else None
+    if mine:
+        return mine[0]
+    hit = quiet.find_tab(owner)          # 2026-11-23: hidden leases live on the windowless broker too
+    if hit:
+        hit[0]["_base"], hit[0]["_port"] = hit[1], hit[2]
+        return hit[0]
+    return None
 
 
 class Attached:
@@ -57,13 +69,15 @@ class Attached:
     def __init__(self, owner, info):
         self.lease_id = None
         tid = info.get("target_id") or ""
+        self.base = info.get("_base")
         try:
-            self.tab = bc.Tab(f"ws://127.0.0.1:{_port()}/devtools/page/{tid}")
+            self.tab = bc.Tab(f"ws://127.0.0.1:{info.get('_port') or _port()}/devtools/page/{tid}")
             self.tab.eval("1")             # the proxy closes a socket on a tab that is not in its lease list
         except Exception:
-            g = bc._post("/lease", {"owner": owner, "url": info.get("url"), "purpose": "bb-click", "ttl": 120})
+            g = quiet.post("/lease", {"owner": owner, "url": info.get("url"), "purpose": "bb-click", "ttl": 120},
+                           base=self.base)
             if g.get("target_id") != tid:      # it opened a new tab instead: give it back
-                bc._post("/release", {"lease_id": g["lease_id"]})
+                quiet.post("/release", {"lease_id": g["lease_id"]}, base=self.base)
                 raise LookupError(f"could not attach to {owner}'s tab {tid[:12]}")
             self.lease_id = g["lease_id"]
             self.tab = bc.Tab(g["ws_url"])
@@ -72,7 +86,7 @@ class Attached:
         self.tab.close()
         if self.lease_id:
             try:
-                bc._post("/release", {"lease_id": self.lease_id})
+                quiet.post("/release", {"lease_id": self.lease_id}, base=self.base)
             except Exception:
                 pass
 
@@ -170,7 +184,15 @@ def main(argv):
     a = Attached(owner, info)
     try:
         label = owner
-        if "--js" in flags:
+        a.tab.owner = owner
+        # 2026-11-23: on login and captcha pages, click quietly (no screenshots, no focus
+        # flips, a curved mouse path) and watch every frame for the change. --shots forces
+        # the old before/after screenshots. Several steps: use bb-session; captchas: bb-captcha.
+        why = None if ("--js" in flags or "--shots" in flags) else quiet.sensitive(a.tab, info.get("url"))
+        if why:
+            print(f"quiet mode ({why})")
+            r = quiet.quiet_click(a.tab, target)
+        elif "--js" in flags:
             r = a.tab.click(target, shots=True, label=label)
         else:
             r = a.tab.click_trusted(target, label=label)
