@@ -444,7 +444,7 @@ def cap_hint(owner):
 
 # ---------- main ----------
 def main():
-    ap = argparse.ArgumentParser(description="Hands-free login from the VPS vault in a hidden tab.")
+    ap = argparse.ArgumentParser(description="Hands-free login from the password vault in a hidden tab.")
     ap.add_argument("site")
     ap.add_argument("--user")
     ap.add_argument("--url")
