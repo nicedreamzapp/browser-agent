@@ -115,6 +115,10 @@ Rules for the list:
   `thing_id=t3_<id>`, `text`) with the `X-Modhash` header. Confirm it worked by reading
   `/user/<name>/comments.json`. Reddit's site-wide search ORs your words, so search per
   subreddit (`/r/<sub>/search.json?restrict_sr=1`) with exact phrases.
+- **Reddit .json is blocked now (11/24):** `www.reddit.com` and `old.reddit.com` `.json`/`/api/me.json`
+  fetches return HTML. Instead, open the thread on old.reddit, read comments from the DOM
+  (`.commentarea .thing.comment`, `data-author`, `.entry .md`), and POST `/api/comment` form-encoded
+  with `uh` = `r.config.modhash`. Verify by loading the comment's permalink. Do every step in ONE lease.
 
 ## Privacy opt-out forms
 
