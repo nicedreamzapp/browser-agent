@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+# vault-fill <broker-owner-or-tab-id> <site-term> [user-selector] [pass-selector]
+# Fills a login form from a password vault over CDP. Never prints the password.
+# Config (env or ~/.config/browser-agent/login.env): BA_VAULT_SSH (ssh host holding the vault),
+# BA_VAULT_GET (command on that host that prints one vault row as json for a search term),
+# BA_CDP (default http://127.0.0.1:9229).
+import json,sys,os,re,subprocess,urllib.request,websocket
+cf=os.path.expanduser("~/.config/browser-agent/login.env")
+if os.path.exists(cf):
+    for l in open(cf):
+        m=re.match(r"\s*(?:export\s+)?(BA_[A-Z_]+)\s*=\s*(.*?)\s*$",l)
+        if m: os.environ.setdefault(m.group(1),m.group(2).strip("'\""))
+if len(sys.argv)<3: sys.exit(__doc__ or "usage: vault-fill <broker-owner-or-tab-id> <site-term> [user-selector] [pass-selector]")
+own,term=sys.argv[1],sys.argv[2]; us=sys.argv[3] if len(sys.argv)>3 else None; ps=sys.argv[4] if len(sys.argv)>4 else 'input[type=password]'
+cdp=os.environ.get("BA_CDP","http://127.0.0.1:9229")
+row=subprocess.run(["ssh",os.environ.get("BA_VAULT_SSH","vault"),f"{os.environ.get('BA_VAULT_GET','vault-get')} {json.dumps(term)} one"],capture_output=True,text=True).stdout.strip()
+if not row: sys.exit(f"no vault entry for {term}")
+r=json.loads(row)
+tid=own
+try: tid=subprocess.run(["bb-peek",own],capture_output=True,text=True).stdout.split("tab ")[1].split(",")[0]
+except Exception: pass
+ts=json.load(urllib.request.urlopen(cdp+"/json"))
+ws=websocket.create_connection(next(t["webSocketDebuggerUrl"] for t in ts if t["id"].startswith(tid)),timeout=10)
+js="""(u,p,us,ps)=>{const set=(el,v)=>{if(!el)return 0;const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;s.call(el,v);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return 1};
+const pe=document.querySelector(ps);const ue=us?document.querySelector(us):document.querySelector('input[type=email],input[autocomplete=username],input[name*=user i],input[name*=login i],input[type=text]');
+return set(ue,u)+set(pe,p)}"""
+ws.send(json.dumps({"id":1,"method":"Runtime.evaluate","params":{"expression":f"({js})({json.dumps(r['user'])},{json.dumps(r['password'])},{json.dumps(us)},{json.dumps(ps)})","returnByValue":True}}))
+while True:
+    m=json.loads(ws.recv())
+    if m.get("id")==1: break
+print(f"filled {m['result']['result'].get('value')} of 2 fields for {r['site']} as {r['user']}")

@@ -185,6 +185,17 @@ Every rule has its own tests on both sides: [`tests/test_five_rules.py`](tests/t
 
 One honest limit: a captcha inside a cross-site frame keeps its clicks to itself, so the broker counts the human's focus moving into that frame as activity rather than each click inside it.
 
+### Logins, 2FA and captchas
+
+Login and captcha pages punish anything that flashes, reloads or clicks like a script, so these tools keep to one quiet connection for the whole job.
+
+- `bb-session <owner> 'click:x,y' 'type:@file' 'key:Enter'` runs a whole multi-step job over one connection (Python: `from quiet import quiet`).
+- `bb-captcha <owner> status|checkbox|shot|click|drag|submit|solve` solves a captcha for the owner: `checkbox`, then `shot` to read the challenge, `click`/`drag` the answer, `submit`.
+- `bb-login <site>` logs in hands-free from your password vault in a hidden tab, reads the 2FA code from your texts or email, hands a captcha to `bb-captcha`, and can text you the result.
+- `vault-fill <owner> <site>` fills a login form from the vault without ever printing the password.
+
+Rule: on login and captcha pages use one quiet session, solve the captcha for the owner on their own trusted machine, and never flash or reload the page. `bb-login` and `vault-fill` read their settings (vault host, phone, mail API, text-sender script) from environment variables or `~/.config/browser-agent/login.env`, which is git-ignored; `bb-login --help` lists the keys.
+
 ### Agent rules
 
 Learned the hard way on 2026-11-07 (clicks hung for minutes in a hidden tab, two jobs opened the same site twice, and the human was told to press buttons his screen did not have). Every agent that drives a tab follows these:

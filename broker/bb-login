@@ -1,0 +1,549 @@
+#!/usr/bin/env python3
+"""bb-login <site> [--user U] [--url URL] [--keep] [--notify] [--json] [--force] [--wait N]
+
+Hands-free login for the browser agent: the agent is the owner's hands.
+One hidden broker lease (windowless Brave when the machine has it, else a hidden tab in his
+Brave; never bb-show), opens the site's login page from the password vault entry (reached over ssh, see login.env), fills username +
+password, submits, and reports one of:
+
+  logged_in | already_logged_in | captcha | wrong_password | needs_code | stuck | no_vault_entry | refused
+
+2FA: when a code is asked it polls for a FRESH code (arrived after this login started) in
+the owner's texts (Messages chat.db, read-only) and email through a mail API, types it and submits.
+No code in --wait seconds (default 90): texts the owner one line ("text me the code") and keeps
+watching 2 more minutes, so a code texted back from his phone is used too.
+
+Captcha: returns status captcha with a crop path and keeps the tab (owner printed) so the
+calling chat can solve it with ~/Scripts/bb-captcha. No second captcha solver here.
+
+Never prints a password or a code. One tab, one lease, no reloads; the tab is closed at the
+end unless --keep (or a captcha) keeps it; a kept tab closes itself when the lease runs out
+(KEEP_TTL) or with `BROKER_URL=<broker> bb-close <owner>`.
+
+Exit: 0 logged in (or already) · 2 needs code · 3 captcha · 4 wrong password · 5 stuck
+      6 no vault entry · 7 refused (bank/gov/one-session site without --force)
+
+Config: environment variables, or ~/.config/browser-agent/login.env (KEY=value lines, git-ignored,
+never in the repo). Keys:
+  BA_PHONE          owner's phone number digits (to spot a code the owner texts back; notify target)
+  BA_ECHO           the chat identifier your own outbound texts echo into (skipped when reading codes)
+  BA_SEND           script that sends a text: called as `script "message"`
+  BA_VAULT_SSH      ssh host alias that holds the vault
+  BA_VAULT_FILE     path on that host to the vault passwords.json (list of {site,url,user,password})
+  BA_CHATDB_SSH     optional ssh command words used to read chat.db when this process lacks Full Disk Access
+  BA_MAIL_ENV       colon-separated env files holding a mail API url and token (key names: BA_MAIL_URL_KEY / BA_MAIL_TOKEN_KEY, default MAIL_API_URL / MAIL_API_TOKEN)
+  BA_MAIL_ACCOUNTS  comma-separated account names for the mail API
+  BA_LOGIN_URLS     optional json file mapping a vault host to its real login url
+  BA_HIDDEN_PROFILE optional dir of a windowless browser profile; when present, logins run there
+  BA_NEVER_RE       optional extra regex of hosts to refuse
+"""
+import argparse, json, os, re, sqlite3, subprocess, sys, threading, time
+from urllib.parse import urlparse, quote
+from urllib.request import Request, urlopen
+
+HOME = os.path.expanduser("~")
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+from broker_client import Tab  # noqa: E402  (the broker's CDP client; not edited here)
+
+def _load_conf():
+    for line in open(os.path.join(HOME, ".config/browser-agent/login.env")) if os.path.exists(
+            os.path.join(HOME, ".config/browser-agent/login.env")) else []:
+        m = re.match(r"\s*(?:export\s+)?(BA_[A-Z_]+)\s*=\s*(.*?)\s*$", line)
+        if m:
+            os.environ.setdefault(m.group(1), m.group(2).strip("'\""))
+
+
+_load_conf()
+CONF = lambda k, d="": os.environ.get(k, d)  # noqa: E731
+
+HIDDEN = bool(CONF("BA_HIDDEN_PROFILE")) and os.path.isdir(os.path.expanduser(CONF("BA_HIDDEN_PROFILE"))) and os.environ.get("BB_WINDOWLESS", "1") != "0"
+BROKER = os.environ.get("BROKER_HIDDEN_URL", "http://127.0.0.1:9233") if HIDDEN else \
+    os.environ.get("BROKER_URL", "http://127.0.0.1:9223")
+KEEP_TTL = 900
+SHOTS = os.path.join(os.environ.get("TMPDIR", "/tmp"), "bb-login")
+LOG = os.path.join(HERE, "click.log")
+CHATDB = os.path.join(HOME, "Library/Messages/chat.db")
+OWNER_PHONE = CONF("BA_PHONE")
+ECHO = CONF("BA_ECHO", "-")          # your own outbound texts echo into this chat
+SEND = CONF("BA_SEND")
+
+# Sites where a scripted login can kick the owner out of their own session or that our rules forbid.
+REFUSE = re.compile(r"chase\.com|authorize\.net|\.gov\b|"
+                    r"paypal|bank|wellsfargo|schwab|fidelity|coinbase" + (("|" + CONF("BA_NEVER_RE")) if CONF("BA_NEVER_RE") else ""), re.I)
+# Vault urls that are not the login page.
+LOGIN_URLS = {
+    "huggingface.co": "https://huggingface.co/login", "www.instagram.com": "https://www.instagram.com/accounts/login/",
+    "www.facebook.com": "https://www.facebook.com/login/", "www.etsy.com": "https://www.etsy.com/signin",
+    "www.reddit.com": "https://www.reddit.com/login/", "hpanel.hostinger.com": "https://auth.hostinger.com/login",
+    "www.rei.com": "https://www.rei.com/login",
+}
+try:
+    LOGIN_URLS.update(json.load(open(os.path.expanduser(CONF("BA_LOGIN_URLS")))))
+except (OSError, ValueError):
+    pass
+LOGINISH = re.compile(r"log-?in|sign-?in|signin|auth|session|account/challenge|i/flow/login", re.I)
+
+
+def log(line):
+    try:
+        with open(LOG, "a") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + "bb-login " + line + "\n")
+    except OSError:
+        pass
+
+
+# ---------- vault (secrets stay in memory, never printed) ----------
+VAULT_PY = r'''
+import json,sys
+t=sys.argv[1].lower()
+rows=[r for r in json.load(open(sys.argv[2])) if t in r["site"].lower() or t in r["url"].lower()]
+print(json.dumps(rows))
+'''
+
+
+def vault_rows(term):
+    r = subprocess.run(["ssh", CONF("BA_VAULT_SSH", "vault"), "python3 - " + json.dumps(term) + " " + json.dumps(CONF("BA_VAULT_FILE", "passwords.json"))], input=VAULT_PY,
+                       capture_output=True, text=True, timeout=30)
+    try:
+        return json.loads(r.stdout.strip() or "[]")
+    except ValueError:
+        return []
+
+
+def pick(rows, user=None):
+    if user:
+        rows = [r for r in rows if user.lower() in r["user"].lower()] or rows
+    rows = [r for r in rows if r.get("password")]
+    if not rows:
+        return None
+    good = [r for r in rows if LOGINISH.search(urlparse(r["url"]).path or "")]
+    return (good or rows)[0]
+
+
+def login_url(row, override=None):
+    if override:
+        return override
+    host = urlparse(row["url"]).hostname or urlparse(row["site"]).hostname or ""
+    if host in LOGIN_URLS:
+        return LOGIN_URLS[host]
+    if LOGINISH.search(urlparse(row["url"]).path or "") or LOGINISH.search(host):
+        return row["url"]
+    return row["site"]
+
+
+# ---------- broker lease (REST, so --keep can leave the tab alive on a TTL) ----------
+def post(path, body):
+    req = Request(BROKER + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"},
+                  method="POST")
+    with urlopen(req, timeout=60) as r:
+        return json.load(r)
+
+
+class Lease:
+    def __init__(self, owner, url):
+        self.owner = owner
+        self.g = post("/lease", {"owner": owner, "url": url, "purpose": "bb-login", "hidden": True, "ttl": 300})
+        self.stop = threading.Event()
+        self.ttl = 300
+        threading.Thread(target=self._renew, daemon=True).start()
+        self.tab = Tab(self.g["ws_url"], step_timeout=15)
+
+    def _renew(self):
+        while not self.stop.wait(60):
+            try:
+                post("/renew", {"lease_id": self.g["lease_id"], "ttl": self.ttl})
+            except Exception:
+                pass
+
+    def done(self, keep=False):
+        self.stop.set()
+        if keep:
+            try:
+                post("/renew", {"lease_id": self.g["lease_id"], "ttl": KEEP_TTL})
+            except Exception:
+                pass
+            self.tab.close()
+            return
+        self.tab.close()
+        try:
+            post("/release", {"lease_id": self.g["lease_id"]})
+        except Exception:
+            pass
+
+
+# ---------- page helpers ----------
+STATE_JS = r'''(()=>{
+const vis=e=>{if(!e)return false;const r=e.getBoundingClientRect();const s=getComputedStyle(e);return r.width>2&&r.height>2&&s.visibility!=='hidden'&&s.display!=='none'&&!e.disabled};
+const meta=i=>[i.name,i.id,i.autocomplete,i.placeholder,i.getAttribute('aria-label'),i.className].join(' ').replace(/([a-z])([A-Z])/g,'$1 $2').replace(/[_-]/g,' ');
+const ins=[...document.querySelectorAll('input')].filter(vis);
+const pw=ins.filter(i=>i.type==='password');
+const user=ins.filter(i=>/^(email|text|tel)$/.test(i.type)&&/user|login|email|account|identifier|session|phone|name/i.test(meta(i))&&!/search|\botp\b|\bcode\b/i.test(meta(i)));
+const otp=ins.filter(i=>i.type!=='password'&&i.type!=='hidden'&&(/one-time-code/.test(i.autocomplete||'')||/\b(otp|totp|2fa|mfa|pin|sms|code|passcode|verification|token)\b|two.?factor|one.?time/i.test(meta(i))));
+const boxes=ins.filter(i=>i.maxLength===1&&/^(text|tel|number|)$/.test(i.type));
+const txt=(document.body?document.body.innerText:'').slice(0,6000);
+const err=[...document.querySelectorAll('[role=alert],.flash-error,.flash-full,.error,.errors,[class*=error i],[aria-live],[class*=alert i]')].filter(vis).map(e=>e.innerText).join(' ').slice(0,600);
+const cap=[...document.querySelectorAll('iframe,.g-recaptcha,.h-captcha,.cf-turnstile,#captcha,[id*=captcha i],[class*=captcha i]')].filter(e=>vis(e)&&(e.tagName!=='IFRAME'||/captcha|challenges\.cloudflare|turnstile|arkoselabs|funcaptcha/i.test(e.src||e.title||'')));
+const capTxt=/verify you are (a )?human|i.m not a robot|complete the (security )?check|solve the puzzle|press and hold/i.test(txt);
+let cr=null;if(cap.length){const r=cap[0].getBoundingClientRect();cr={x:Math.max(0,r.x-10),y:Math.max(0,r.y-10),w:r.width+20,h:r.height+20}}
+return {url:location.href,title:document.title,ready:document.readyState,pw:pw.length,user:user.length,otp:otp.length,boxes:boxes.length,otc:ins.some(i=>/one-time-code/.test(i.autocomplete||'')),
+captcha:cap.length>0||capTxt,crop:cr,
+wrong:/incorrect|invalid|wrong|didn.t match|doesn.t match|not recognized|couldn.t find|try again/i.test(err)&&/password|username|email|login|credential|account|sign/i.test(err),
+twofa:/two-factor|2-step|two-step|verification code|authentication code|enter the code|we sent|we just sent|device verification|verify your device|security code|one-time|confirm it.s you/i.test(txt),
+signed:/sign out|log out|logout|your profile|your account|dashboard/i.test(txt)}})()'''
+
+FILL_FN = r'''function(u,p,doUser,doPw){
+const vis=e=>{if(!e)return false;const r=e.getBoundingClientRect();const s=getComputedStyle(e);return r.width>2&&r.height>2&&s.visibility!=='hidden'&&s.display!=='none'&&!e.disabled};
+const meta=i=>[i.name,i.id,i.autocomplete,i.placeholder,i.getAttribute('aria-label'),i.className].join(' ').replace(/([a-z])([A-Z])/g,'$1 $2').replace(/[_-]/g,' ');
+const set=(el,v)=>{el.focus();const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;s.call(el,v);
+ el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return 1};
+const ins=[...document.querySelectorAll('input')].filter(vis);
+const pe=ins.find(i=>i.type==='password');
+let ue=ins.find(i=>/username|current-username/.test(i.autocomplete||''))||ins.find(i=>/^(email|text|tel)$/.test(i.type)&&/user|login|email|account|identifier|session|phone|name/i.test(meta(i))&&!/search|\botp\b|\bcode\b/i.test(meta(i)));
+let n=0;if(doUser&&ue)n+=set(ue,u);if(doPw&&pe)n+=set(pe,p);return n}'''
+
+OTP_FN = r'''function(code){
+const vis=e=>{if(!e)return false;const r=e.getBoundingClientRect();const s=getComputedStyle(e);return r.width>2&&r.height>2&&s.visibility!=='hidden'&&s.display!=='none'&&!e.disabled};
+const meta=i=>[i.name,i.id,i.autocomplete,i.placeholder,i.getAttribute('aria-label'),i.className].join(' ').replace(/([a-z])([A-Z])/g,'$1 $2').replace(/[_-]/g,' ');
+const set=(el,v)=>{el.focus();const s=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;s.call(el,v);
+ el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true,key:v.slice(-1)}));el.dispatchEvent(new Event('change',{bubbles:true}));return 1};
+const ins=[...document.querySelectorAll('input')].filter(vis);
+const boxes=ins.filter(i=>i.maxLength===1&&/^(text|tel|number|)$/.test(i.type));
+if(boxes.length>=code.length){code.split('').forEach((c,k)=>set(boxes[k],c));return 'boxes'}
+const el=ins.find(i=>/one-time-code/.test(i.autocomplete||''))||ins.find(i=>i.type!=='password'&&/\b(otp|totp|2fa|mfa|pin|sms|code|passcode|verification|token)\b|two.?factor|one.?time/i.test(meta(i)));
+if(!el)return '';set(el,code);return 'field'}'''
+
+SUBMIT_JS = r'''(()=>{
+const vis=e=>{if(!e)return false;const r=e.getBoundingClientRect();const s=getComputedStyle(e);return r.width>2&&r.height>2&&s.visibility!=='hidden'&&s.display!=='none'&&!e.disabled};
+const ins=[...document.querySelectorAll('input')].filter(vis);
+const f=(ins.find(i=>i.type==='password')||ins.find(i=>/one-time-code/.test(i.autocomplete||''))||ins[0]||{}).form;
+let b=f?[...f.querySelectorAll('button[type=submit],input[type=submit],button:not([type])')].find(vis):null;
+if(!b)b=[...document.querySelectorAll('button,input[type=submit],[role=button]')].filter(vis).find(e=>/^(sign ?in|log ?in|continue|next|verify|submit|confirm)$/i.test((e.innerText||e.value||'').trim()));
+if(!b)return null;const r=b.getBoundingClientRect();window.__bbl_form=f||null;return {x:r.x+r.width/2,y:r.y+r.height/2,label:(b.innerText||b.value||'').trim().slice(0,30)}})()'''
+
+
+def ev(tab, js, timeout=15):
+    try:
+        return tab.eval(js, timeout=timeout)
+    except Exception:
+        return None
+
+
+def call(tab, fn, *args):
+    doc = tab.send("Runtime.evaluate", expression="document")["result"]["objectId"]
+    r = tab.send("Runtime.callFunctionOn", objectId=doc, functionDeclaration=fn,
+                 arguments=[{"value": a} for a in args], returnByValue=True)
+    return r.get("result", {}).get("value")
+
+
+def state(tab):
+    return ev(tab, STATE_JS) or {}
+
+
+def wait_ready(tab, secs=20):
+    end = time.time() + secs
+    s = {}
+    while time.time() < end:
+        s = state(tab)
+        if s.get("ready") == "complete" and (s.get("pw") or s.get("user") or s.get("otp") or time.time() > end - secs + 4):
+            return s
+        time.sleep(1)
+    return s
+
+
+def submit(tab):
+    before = (state(tab) or {}).get("url")
+    b = ev(tab, SUBMIT_JS)
+    if b:
+        for t in ("mousePressed", "mouseReleased"):
+            tab.send("Input.dispatchMouseEvent", type=t, x=b["x"], y=b["y"], button="left", clickCount=1)
+    time.sleep(3)
+    s = state(tab)
+    if s.get("url") == before and (s.get("pw") or s.get("user") or s.get("otp")) and not s.get("wrong"):
+        ev(tab, "(()=>{const f=window.__bbl_form;if(f){f.requestSubmit?f.requestSubmit():f.submit();return 1}"
+                "const a=document.activeElement;if(a){a.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,bubbles:true}));}return 0})()")
+    return b
+
+
+def outcome(tab, start_url, secs=20):
+    """Poll until the page says what happened after a submit."""
+    end = time.time() + secs
+    s = {}
+    while time.time() < end:
+        time.sleep(1.5)
+        s = state(tab)
+        if not s:
+            continue
+        if s.get("captcha"):
+            return "captcha", s
+        if (s.get("twofa") and (s.get("otp") or s.get("boxes") >= 4)) or s.get("otc"):
+            return "twofa", s
+        if s.get("wrong") and s.get("pw"):
+            return "wrong_password", s
+        if not s.get("pw") and not s.get("user") and s.get("ready") == "complete" and \
+                (s.get("url") != start_url or s.get("signed")) and not LOGINISH.search(urlparse(s.get("url", "")).path):
+            return "logged_in", s
+    if s.get("pw") and s.get("wrong"):
+        return "wrong_password", s
+    if s and not s.get("pw") and not s.get("user") and not s.get("otp") and \
+            not LOGINISH.search(urlparse(s.get("url", "")).path):
+        return "logged_in", s
+    return "stuck", s
+
+
+def shot(tab, name, crop=None):
+    os.makedirs(SHOTS, exist_ok=True)
+    p = os.path.join(SHOTS, "%s-%s.png" % (re.sub(r"[^\w.-]+", "_", name), time.strftime("%H%M%S")))
+    try:
+        import base64
+        kw = {"format": "png", "captureBeyondViewport": True}
+        if crop:
+            kw["clip"] = {"x": crop["x"], "y": crop["y"], "width": crop["w"], "height": crop["h"], "scale": 1}
+        data = tab.send("Page.captureScreenshot", _timeout=20, **kw)["data"]
+        open(p, "wb").write(base64.b64decode(data))
+        return p
+    except Exception:
+        return None
+
+
+# ---------- fresh 2FA codes ----------
+CODE_HINT = re.compile(r"code|verif|otp|passcode|\bpin\b|log ?in|sign ?in|security|one.?time|2fa|authenticat|confirm", re.I)
+
+
+def extract(text, mine=False):
+    t = text or ""
+    if mine:   # owner texting a bare code back
+        m = re.fullmatch(r"\s*(\d[\d\s-]{2,10}\d)\s*", t)
+        if m:
+            d = re.sub(r"\D", "", m.group(1))
+            return d if 4 <= len(d) <= 8 else None
+    if not CODE_HINT.search(t):
+        return None
+    num = r"(\d{3}[- ]\d{3}|\d{4,8})(?![\d,]|\.\d)"
+    pats = [r"(?:code|passcode|otp|pin|verification|one.?time|security code|log ?in code)\D{0,40}?(?<![\d$#])" + num,
+            r"(?<![\d$#.,/:])" + num + r"[^\n]{0,30}?(?:is your|is the|as your)?[^\n]{0,15}?(?:code|passcode|otp|pin)\b"]
+    for pt in pats:
+        m = re.search(pt, t, re.I)
+        if m:
+            d = re.sub(r"\D", "", m.group(1))
+            if not re.fullmatch(r"(19|20)\d\d", d):
+                return d
+    return None
+
+
+def _chatdb(sql):
+    try:
+        db = sqlite3.connect("file:%s?mode=ro" % CHATDB, uri=True, timeout=5)
+        rows = db.execute(sql).fetchall()
+        db.close()
+        return rows
+    except Exception:
+        pass
+    if not CONF("BA_CHATDB_SSH"):
+        return []
+    r = subprocess.run(CONF("BA_CHATDB_SSH").split() + ["/usr/bin/sqlite3 -readonly -json \"$HOME/Library/Messages/chat.db\""],
+                       input=sql, capture_output=True, text=True, timeout=25)
+    try:
+        return [tuple(d.values()) for d in json.loads(r.stdout or "[]")]
+    except ValueError:
+        return []
+
+
+def text_codes(since):
+    apple = int((since - 978307200) * 1e9)
+    sql = ("SELECT m.ROWID, c.chat_identifier, COALESCE(m.text,''), hex(m.attributedBody) FROM message m "
+           "JOIN chat_message_join j ON j.message_id=m.ROWID JOIN chat c ON c.ROWID=j.chat_id "
+           "WHERE m.is_from_me=0 AND m.date > %d AND c.chat_identifier != '%s' ORDER BY m.date DESC LIMIT 20"
+           % (apple, ECHO))
+    out = []
+    for _rid, who, txt, body in _chatdb(sql):
+        if not txt and body:      # newer messages keep the words only in attributedBody
+            raw = bytes.fromhex(body).decode("utf-8", "ignore")
+            m = re.search(r"NSString.{1,6}?\+.(.+?)(?:\x86|\x84|NSDictionary)", raw, re.S)
+            txt = (m.group(1) if m else raw)[:600]
+        c = extract(txt, mine=bool(OWNER_PHONE) and OWNER_PHONE in (who or ""))
+        if c:
+            out.append((c, txt))
+    return out
+
+
+_MAIL = {}
+KU, KT = CONF("BA_MAIL_URL_KEY", "MAIL_API_URL"), CONF("BA_MAIL_TOKEN_KEY", "MAIL_API_TOKEN")
+
+
+def _mail():
+    if not _MAIL:
+        for f in [p for p in CONF("BA_MAIL_ENV").split(":") if p]:
+            try:
+                for line in open(f):
+                    m = re.match(r"\s*(?:export\s+)?(%s|%s)\s*=\s*['\"]?([^'\"\s]+)" % (KU, KT), line)
+                    if m:
+                        _MAIL.setdefault("MAIL_API_URL" if m.group(1) == KU else "MAIL_API_TOKEN", m.group(2))
+            except OSError:
+                pass
+    return _MAIL
+
+
+def _mail_get(path):
+    h = _mail()
+    if not h.get("MAIL_API_URL"):
+        return {}
+    req = Request(h["MAIL_API_URL"] + path, headers={"Authorization": "Bearer " + h.get("MAIL_API_TOKEN", "")})
+    try:
+        with urlopen(req, timeout=20) as r:
+            return json.load(r)
+    except Exception:
+        return {}
+
+
+def mail_codes(since, seen):
+    out = []
+    for acct in [a for a in CONF("BA_MAIL_ACCOUNTS").split(",") if a]:
+        d = _mail_get("/api/gmail/search?q=%s&account=%s" % (quote("newer_than:1d"), acct))
+        for m in d.get("messages", [])[:15]:
+            try:
+                ts = int(m.get("ts", 0)) / 1000
+            except ValueError:
+                continue
+            if ts < since - 5 or "SENT" in str(m.get("labels")):
+                continue
+            blob = "%s %s" % (m.get("subject", ""), m.get("snippet", ""))
+            c = extract(blob)
+            if not c and CODE_HINT.search(blob) and m.get("id") not in seen:
+                seen.add(m.get("id"))
+                full = _mail_get("/api/gmail/message/%s?account=%s" % (m.get("id"), acct))
+                body = " ".join(str(full.get(k, "")) for k in ("subject", "body", "text", "snippet"))
+                c = extract(body)
+            if c:
+                out.append((c, blob))
+    return out
+
+
+def text_owner(line):
+    if SEND and os.path.exists(SEND):
+        subprocess.run(["bash", SEND, line], capture_output=True, text=True, timeout=60,
+                       env=dict(os.environ, IMESSAGE_TAG="LOGIN"))
+
+
+def find_code(since, site_word, used, seen):
+    cands = text_codes(since) + mail_codes(since, seen)
+    cands = [(c, t) for c, t in cands if c not in used]
+    if not cands:
+        return None
+    for c, t in cands:          # prefer a message naming the site
+        if site_word and site_word in t.lower():
+            return c
+    return cands[0][0]
+
+
+def cap_hint(owner):
+    if os.path.exists(os.path.join(HOME, "Scripts/bb-captcha")):
+        return " Tab kept: bb-captcha %s shot / click / submit, then rerun bb-login." % owner
+    return " Tab kept as owner %s." % owner
+
+
+# ---------- main ----------
+def main():
+    ap = argparse.ArgumentParser(description="Hands-free login from the VPS vault in a hidden tab.")
+    ap.add_argument("site")
+    ap.add_argument("--user")
+    ap.add_argument("--url")
+    ap.add_argument("--keep", action="store_true", help="leave the tab open (closes itself in 15 min)")
+    ap.add_argument("--notify", action="store_true", help="text the owner the one-line result")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--force", action="store_true", help="allow a bank/gov/one-session site")
+    ap.add_argument("--wait", type=int, default=90, help="seconds to wait for a 2FA code before texting the owner")
+    a = ap.parse_args()
+    t0 = time.time()
+    res = {"site": a.site, "status": "stuck"}
+
+    def finish(status, line, code, **extra):
+        res.update(status=status, line=line, **extra)
+        log("%s -> %s (%ds)" % (a.site, status, time.time() - t0))
+        print(json.dumps(res) if a.json else line)
+        if a.notify:
+            text_owner("LOGIN: " + line)
+        sys.exit(code)
+
+    row = pick(vault_rows(a.site), a.user)
+    if not row:
+        finish("no_vault_entry", "No saved login for %s in the vault." % a.site, 6)
+    url = login_url(row, a.url)
+    host = (urlparse(url).hostname or a.site).lower()
+    if REFUSE.search(host) and not a.force:
+        finish("refused", "%s is a one-session or money site; rerun with --force if the owner said so." % host, 7)
+    site_word = host.replace("www.", "").split(".")[0]
+    owner = "bb-login-" + site_word
+    res.update(owner=owner, broker=BROKER, user=row["user"])
+    try:
+        L = Lease(owner, url)
+    except Exception as e:
+        finish("stuck", "%s: the hidden browser refused the tab (%s)." % (host, str(e)[:120]), 5)
+    tab = L.tab
+    keep = a.keep
+    try:
+        tab.send("Page.enable")
+        s = wait_ready(tab)
+        if not s.get("pw") and not s.get("user") and not s.get("otp") and not LOGINISH.search(urlparse(s.get("url", "")).path):
+            finish("already_logged_in", "%s: already logged in." % host, 0)
+        if s.get("captcha") and not s.get("pw"):
+            keep = True
+            crop = shot(tab, owner + "-captcha", s.get("crop"))
+            finish("captcha", "%s: captcha before the form; crop %s.%s" % (host, crop, cap_hint(owner)), 3, crop=crop)
+        start_url = s.get("url")
+        if s.get("pw"):
+            call(tab, FILL_FN, row["user"], row["password"], bool(s.get("user")), True)
+            submit(tab)
+        elif s.get("user"):           # two-step form: username, then password
+            call(tab, FILL_FN, row["user"], row["password"], True, False)
+            submit(tab)
+            end = time.time() + 15
+            while time.time() < end and not state(tab).get("pw"):
+                time.sleep(1)
+            if not state(tab).get("pw"):
+                st, s = outcome(tab, start_url, 8)
+                if st not in ("twofa", "logged_in", "captcha"):
+                    finish("stuck", "%s: no password box after the username step; screenshot %s." % (host, shot(tab, owner)), 5)
+            else:
+                call(tab, FILL_FN, row["user"], row["password"], False, True)
+                submit(tab)
+        st, s = outcome(tab, start_url)
+        if st == "captcha":
+            keep = True
+            crop = shot(tab, owner + "-captcha", s.get("crop"))
+            finish("captcha", "%s: captcha; crop %s.%s" % (host, crop, cap_hint(owner)), 3, crop=crop)
+        if st == "wrong_password":
+            finish("wrong_password", "%s: the site says the saved password for %s is wrong." % (host, row["user"]), 4)
+        if st == "twofa":
+            used, seen, texted = set(), set(), False
+            deadline, hard = time.time() + a.wait, time.time() + a.wait + 120
+            while time.time() < hard:
+                code = find_code(t0, site_word, used, seen)
+                if code:
+                    used.add(code)
+                    kind = call(tab, OTP_FN, code)
+                    if kind:
+                        time.sleep(1)
+                        submit(tab)
+                        st, s = outcome(tab, s.get("url"), 20)
+                        if st == "logged_in":
+                            finish("logged_in", "%s: logged in (2FA code typed)." % host, 0)
+                        if st == "captcha":
+                            keep = True
+                            crop = shot(tab, owner + "-captcha", s.get("crop"))
+                            finish("captcha", "%s: captcha after the code; crop %s.%s" % (host, crop, cap_hint(owner)), 3, crop=crop)
+                if time.time() > deadline and not texted:
+                    texted = True
+                    text_owner("LOGIN: %s wants a code and none came in 90s. Text me the code." % host)
+                time.sleep(3)
+            keep = keep or a.keep
+            finish("needs_code", "%s: asked for a 2FA code and none arrived; screenshot %s." % (host, shot(tab, owner)), 2)
+        if st == "logged_in":
+            finish("logged_in", "%s: logged in." % host, 0)
+        finish("stuck", "%s: no clear result after submit; screenshot %s." % (host, shot(tab, owner)), 5)
+    finally:
+        L.done(keep=keep)
+
+
+if __name__ == "__main__":
+    main()
