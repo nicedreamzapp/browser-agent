@@ -568,3 +568,25 @@ Submit stays `disabled` until every field incl. phone is filled; use the shop's 
 - Now: `bb-click` goes quiet on its own on login URLs and pages with an hCaptcha / reCAPTCHA / Turnstile frame (no screenshots, no focus flips, curved mouse path, every frame watched). Multi-step jobs: `bb-session <owner> 'click:x,y' 'type:@file' 'key:Enter'` holds ONE connection. Python: `from quiet import quiet; with quiet(owner) as s: s.click(x, y)`.
 - Captchas on Matt's own pages are solved for him (he keeps them; the agent is his hands): `bb-captcha <owner> checkbox`, then `shot` (read the PNG), `click img:x,y ...` or `t4` for tile 4, `drag P1 P2` for drag-to-outline, `submit`. "another round" = shot again. Tested on accounts.hcaptcha.com/demo in a hidden lease: cleared 2 of 2 runs on the first try (two rounds each).
 - A captcha moving focus into its challenge iframe no longer reads as human input for 8 s after the agent's own input (proxy FRAME_ECHO), so the next click is not blocked.
+## LinkedIn — sending a DM in an existing thread (2026-11-24, verified)
+
+Composer: `div.msg-form__contenteditable[contenteditable='true']`.
+
+**There is no Send button in the current UI.** Enumerating buttons inside `form.msg-form`
+returns only Maximize, Attach image, Attach file, GIF, Emoji, and `msg-form__send-toggle`
+("Open send options"). Matching a button by the word "send" clicks that toggle, which opens a
+dropdown and sends nothing. `button.msg-form__send-button` does not exist.
+
+**Enter sends.** Use Shift+Enter for line breaks inside the message, then a bare Enter to send.
+
+Working sequence: goto thread URL, wait ~7s, click the composer, Control+A then Backspace to
+clear any leftover draft (a closed tab can leave one), `keyboard.type` the first paragraph,
+Shift+Enter twice, type the rest, read `box.inner_text()` back and assert it matches before
+sending, Enter, wait ~6s, then confirm by reading the last `li.msg-s-message-list__event` and
+checking it contains your text and shows as from Matt.
+
+Reading a thread: the notification email only says "You have 1 new message", never the body.
+Pull the thread URL out of the email and read
+`li.msg-s-message-list__event` / `.msg-s-event-listitem` innerText. Run it on the MINI, not the
+PC (PC Brave is down, broker answers 9222 but the browser behind it is unreachable) and not the
+M5. Close the page in a `finally` block.
