@@ -148,6 +148,10 @@ Rules for the list:
   as t.co plus `entities.urls[].expanded_url`) and a `video` field. A hidden status page
   sometimes leaves a trailing link out of `tweetText`, so a DOM readback of the last URL
   is not proof it is missing.
+  On a 61 MB / 2:01 video (2026-11-21) the upload took ~2 min and the page once threw "Inspected target
+  navigated or closed" mid-upload (nothing posted): retry Runtime.evaluate on that error instead of dying. The
+  CreateTweet wrap also missed the main post's response once even though it posted; confirm with the from:
+  search before any retry. Long posts (>280) on @NiceDreamzApps are allowed: tweetButton is enabled with text only.
 
 - **Reddit comments:** skip the composer. In a logged-in tab (a background tab is fine),
   read `modhash` from `/api/me.json`, then POST `/api/comment` (`api_type=json`,
@@ -563,6 +567,12 @@ Submit stays `disabled` until every field incl. phone is filled; use the shop's 
 - `#transferProcessSetupDns` ("Pause my transfer until I've set up DNS here") is CHECKED by default. Untick it when the domain keeps its outside nameservers, or the transfer sits paused.
 - Checkout: tick `#tosAgreement`, pick "On File" payment, "Continue to Billing", then "Pay Now"; success URL is /checkout/success/<order>.
 
+## Facebook personal post composer is a full page now (2026-11-21)
+- Clicking "What's on your mind, Matt?" opens a full-page "Create post" editor, not a `div[role=dialog]`. Look for `input[type=file]` anywhere on the page (no dialog scope); the drop zone reads "Add photos or videos". It has an "Add AI label" switch, so turn it on for videos with AI shots.
+- The broker blocks a third open of facebook.com in 5 minutes. Do the whole job in ONE lease, and check the page with a screenshot BEFORE retrying. Script: mini ~/Scripts/fb-post/herc_post.py (gated on a go file).
+- 11/21 lesson: a script checked `document.querySelector('video')` to prove the upload, but a story video elsewhere on the page matched, so it posted a LINK post with no video (Matt trashed it). Prove the upload ONLY by the composer's own "Uploaded media" block showing the file name, and check again right before Post. Close tag suggestions with Escape before each Enter, or "#History" becomes "#historyfacts".
+- 11/21 WORKING Facebook video recipe (~/Scripts/fb-post/herc_post.py): patch HTMLInputElement.prototype.click/showPicker to stash the file input in window.__fi, trusted-click "Add photos or videos", then DOM.setFileInputFiles on window.__fi's objectId. The composer turns into "Create reel"; prove the attach by "Uploaded media" plus the video's duration (e.g. 2:13), NOT the file name, which isn't shown. Type the caption into "Describe your reel..." and press Escape before each Enter. After Post it takes minutes to process; verify on /<profile>/reels/.
+
 ## Login and captcha pages: quiet mode (2026-11-23)
 - On the ineedhemp.com wp-login hCaptcha, one `bb-click` per point reconnected, screenshotted before and after, and flipped focus emulation each time (~4 s a click): the page flashed on Matt's screen, the mouse teleported, hCaptcha turned down a right answer, and bb-click said "nothing changed" for clicks that worked inside the cross-origin captcha frame.
 - Now: `bb-click` goes quiet on its own on login URLs and pages with an hCaptcha / reCAPTCHA / Turnstile frame (no screenshots, no focus flips, curved mouse path, every frame watched). Multi-step jobs: `bb-session <owner> 'click:x,y' 'type:@file' 'key:Enter'` holds ONE connection. Python: `from quiet import quiet; with quiet(owner) as s: s.click(x, y)`.
@@ -590,3 +600,11 @@ Pull the thread URL out of the email and read
 `li.msg-s-message-list__event` / `.msg-s-event-listitem` innerText. Run it on the MINI, not the
 PC (PC Brave is down, broker answers 9222 but the browser behind it is unreachable) and not the
 M5. Close the page in a `finally` block.
+
+## Reddit image post: the reddit-post pipeline (verified 2026-11-27, mini, hidden windowless lease)
+- Use `reddit-post` (mini `~/Scripts/reddit-post/reddit-post`, on PATH): `reddit-post --sub X --title "..." --image file.png [--nsfw] [--flair F] [--body "..."] [--dry-run]`, `reddit-post --delete ID [ID ...]`. 5/5 clean image posts on a private test sub before first real use.
+- The 2026 Shreddit composer at `/r/<sub>/submit/?type=IMAGE` has NO Text / Images & Video tab row. The image control is the picture icon in the composer toolbar: the `post-composer-toolbar-button-image` element (aria-label "Image"). With `Page.setInterceptFileChooserDialog` on, a trusted click on it fires `Page.fileChooserOpened`; `DOM.setFileInputFiles(backendNodeId)` on that node uploads and flips the hidden `input[name=type]` to IMAGE and enables the `IMAGE|VIDEO` fieldset by itself. The failed 11/27 tries (files set straight on `r-post-media-input`, type field flipped by hand) sent CreatePost with no image; the toolbar button path has not missed once.
+- Upload done = `r-post-media-input` shadow text has no "Uploading" and `.value` holds a `mediaId`; the preview is a visible `blob:` img (1280 px natural width) in the form. Hidden tabs still need `Emulation.setFocusEmulationEnabled` + `Page.setWebLifecycleState active` first.
+- Title: trusted click on `post-composer-title`'s shadow textarea, then `Input.insertText`, read `.value` back. NSFW: shown as an "NSFW" tag under the sub picker when the sub defaults to it; otherwise "Add tags", NSFW switch, Add.
+- Safety gate that makes it deterministic: wrap `fetch`, and let the `"operation":"CreatePost"` request through only when `variables.input` has the exact title, `image.url` ending in the uploaded mediaId and `isNsfw:true` when asked; otherwise reject it (nothing posts). The response's `createSubredditPost.post.permalink` is the post; confirm with the read-only API (`/by_id/t3_<id>`: `post_hint` image / i.redd.it url, `over_18`).
+- old.reddit `/submit` has only link/text tabs (no image upload), so it is not a path for image posts. Deleting: `/api/del` with the modhash from an old.reddit tab. Creating a private sub: old.reddit `/api/site_admin` (`type=private`) with the modhash works from a logged-in tab.
